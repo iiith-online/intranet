@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { crawl, recentPages, search } from "./crawler";
 import { FIXTURES, serveFixtures } from "../../testdata/fixtures";
 
-let server: Server | null = null;
+let server: Server<undefined> | null = null;
 let dbPath = "";
 
 beforeAll(() => {

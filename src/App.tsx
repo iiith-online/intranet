@@ -14,7 +14,7 @@ type PageMeta = {
 };
 
 type Result = { url: string; title: string; meta: PageMeta; fetched_at: string; snippet: string };
-type Page = { url: string; title: string; status: number; fetched_at: string };
+type Page = { url: string; title: string; status: number; meta: PageMeta; fetched_at: string };
 type SearchResponse = { query: string; indexed: boolean; results: Result[] };
 type PagesResponse = { pages: Page[] };
 
@@ -30,11 +30,33 @@ function formatSize(bytes?: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function metaLine(r: Result): string {
-  const m = r.meta ?? {};
-  if (m.kind === "file") return `${m.contentType ?? "file"} · ${formatSize(m.contentLength)}`;
+function fileName(url: string): string {
+  const last = url.split("/").pop() ?? url;
+  try {
+    return decodeURIComponent(last) || url;
+  } catch {
+    return last;
+  }
+}
+
+function fileKind(m: PageMeta): string {
+  const ct = m.contentType ?? "";
+  if (ct.includes("pdf")) return "PDF";
+  if (ct.includes("spreadsheet") || ct.includes("excel")) return "Excel";
+  if (ct.includes("word") || ct.includes("officedocument.word")) return "Word";
+  if (ct.includes("jpeg") || ct.includes("png") || ct.includes("gif") || ct.includes("webp")) return "Image";
+  if (ct.includes("zip")) return "ZIP";
+  if (ct.includes("html")) return "Web page";
+  const short = ct.split("/").pop();
+  return short ? short.toUpperCase() : "File";
+}
+
+function metaLine(m: PageMeta): string {
+  if (!m || !m.kind) return "";
+  if (m.kind === "file") return `${fileKind(m)} · ${formatSize(m.contentLength)}`;
   if (m.kind === "redirect") return `Redirects to ${m.redirectTo ?? ""}`;
-  return m.description ?? "";
+  if (m.kind === "html") return m.description || "Web page";
+  return "";
 }
 
 export function App() {
@@ -95,7 +117,9 @@ export function App() {
       if (!r.ok || !d.started) throw new Error(d.error ?? `HTTP ${r.status}`);
       // Poll until the background crawl finishes.
       for (;;) {
-        await new Promise((resolve) => setTimeout(resolve, 2000));
+        const { promise, resolve } = Promise.withResolvers<void>();
+        setTimeout(resolve, 2000);
+        await promise;
         const s = (await (await fetch("/api/scan")).json()) as {
           running: boolean;
           last: { fetched?: number; failed?: number; error?: string } | null;
@@ -166,16 +190,18 @@ export function App() {
           <h2 className="mb-4 text-lg font-semibold">Indexed pages</h2>
           <div className="grid gap-3 sm:grid-cols-2">
             {pages.map((p) => (
-              <Card key={p.url} className="gap-3 py-4">
-                <CardHeader className="gap-1 px-4">
-                  <CardTitle className="text-base">
+              <Card key={p.url} className="gap-1 py-4">
+                <CardHeader className="gap-1 px-4 py-0">
+                  <CardTitle className="text-sm leading-snug">
                     <a href={p.url} target="_blank" rel="noreferrer" className="hover:underline">
-                      {p.title || p.url}
+                      {p.title || fileName(p.url)}
                     </a>
                   </CardTitle>
-                  <CardDescription className="break-all">{p.url}</CardDescription>
                 </CardHeader>
-                <CardContent className="px-4 text-xs text-muted-foreground">
+                <CardContent className="break-all px-4 py-0 text-xs text-muted-foreground">{p.url}</CardContent>
+                <CardContent className="px-4 py-0 text-xs text-muted-foreground">
+                  {metaLine(p.meta)}
+                  {metaLine(p.meta) && " · "}
                   Indexed {formatDate(p.fetched_at)}
                 </CardContent>
               </Card>
@@ -198,17 +224,19 @@ export function App() {
         <ul className="space-y-4">
           {results.map((r) => (
             <li key={r.url}>
-              <Card className="gap-3 py-4">
-                <CardHeader className="gap-1 px-4">
+              <Card className="gap-2 py-4">
+                <CardHeader className="gap-1 px-4 py-0">
                   <CardTitle className="text-base">
                     <a href={r.url} target="_blank" rel="noreferrer" className="text-primary hover:underline">
-                      {r.title || r.url}
+                      {r.title || fileName(r.url)}
                     </a>
                   </CardTitle>
                   <CardDescription className="break-all">{r.url}</CardDescription>
                 </CardHeader>
-                <CardContent className="px-4">
-                  <p className="text-sm text-muted-foreground">{r.snippet || metaLine(r)}</p>
+                <CardContent className="px-4 py-0">
+                  <p className="text-sm text-muted-foreground">
+                    {r.meta?.kind === "html" ? r.snippet || metaLine(r.meta) : metaLine(r.meta)}
+                  </p>
                   <p className="mt-2 text-xs text-muted-foreground">Indexed {formatDate(r.fetched_at)}</p>
                 </CardContent>
               </Card>

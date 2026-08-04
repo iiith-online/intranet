@@ -25,7 +25,7 @@ const DATABASE_URL = process.env.DATABASE_URL;
 /** Portable Postgres handle: postgres.js (TCP) or the Neon serverless driver
  *  (HTTPS, for networks that block port 5432). Both take $n placeholders. */
 type Db = {
-  query(text: string, params?: unknown[]): Promise<Record<string, unknown>[]>;
+  query(text: string, params?: any[]): Promise<Record<string, unknown>[]>;
   end(): Promise<void>;
 };
 
@@ -44,7 +44,7 @@ export type CrawlOptions = {
 };
 
 export type PageMeta = {
-  kind: "html" | "file" | "redirect";
+  kind: "html" | "file" | "redirect" | "error";
   description?: string;
   keywords?: string;
   ogTitle?: string;
@@ -416,15 +416,16 @@ export function search(dbPath: string, query: string, limit = 20): SearchResult[
   }
 }
 
-export function recentPages(dbPath: string, limit = 50): { url: string; title: string; status: number; fetched_at: string }[] {
+export function recentPages(dbPath: string, limit = 50): { url: string; title: string; status: number; meta: PageMeta; fetched_at: string }[] {
   if (!existsSync(dbPath)) return [];
   const db = new Database(dbPath, { readonly: true });
   try {
-    return db
+    const rows = db
       .query(
-        "SELECT url, title, status, fetched_at FROM pages WHERE status = 200 ORDER BY fetched_at DESC LIMIT ?",
+        "SELECT url, title, status, meta, fetched_at FROM pages WHERE status = 200 ORDER BY fetched_at DESC LIMIT ?",
       )
-      .all(limit) as { url: string; title: string; status: number; fetched_at: string }[];
+      .all(limit) as { url: string; title: string; status: number; meta: string; fetched_at: string }[];
+    return rows.map((r) => ({ url: r.url, title: r.title, status: r.status, meta: parseMeta(r.meta), fetched_at: r.fetched_at }));
   } finally {
     db.close();
   }
@@ -548,17 +549,18 @@ export async function searchIndex(query: string, limit = 20): Promise<SearchResu
   return pgs ? pgSearch(pgs, query, limit) : search(DEFAULT_DB, query, limit);
 }
 
-export async function recentPagesIndex(limit = 50): Promise<{ url: string; title: string; status: number; fetched_at: string }[]> {
+export async function recentPagesIndex(limit = 50): Promise<{ url: string; title: string; status: number; meta: PageMeta; fetched_at: string }[]> {
   const pgs = await pg();
   if (!pgs) return recentPages(DEFAULT_DB, limit);
   const rows = await pgs.query(
-    "SELECT url, title, status, fetched_at FROM pages WHERE status = 200 ORDER BY fetched_at DESC LIMIT $1",
+    "SELECT url, title, status, meta, fetched_at FROM pages WHERE status = 200 ORDER BY fetched_at DESC LIMIT $1",
     [limit],
   );
   return rows.map((r) => ({
     url: String(r.url),
     title: String(r.title ?? ""),
     status: Number(r.status),
+    meta: (r.meta ?? {}) as PageMeta,
     fetched_at: new Date(r.fetched_at as string).toISOString(),
   }));
 }
@@ -592,5 +594,6 @@ if (import.meta.main) {
     `done in ${((Date.now() - started) / 1000).toFixed(1)}s: ${result.fetched} pages indexed, ` +
       `${result.skipped} robots-skipped, ${result.failed} failed`,
   );
-  await _db?.end(); // release the pool so the process can exit
+  const db = await pg();
+  await db?.end(); // release the pool so the process can exit
 }

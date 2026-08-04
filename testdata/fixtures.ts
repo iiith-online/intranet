@@ -38,7 +38,7 @@ export const FIXTURES: Record<string, { status: number; type: string; body: stri
   "/robots.txt": { status: 200, type: "text/plain", body: "User-agent: *\nDisallow: /private\n" },
 };
 
-export function serveFixtures(options: { port?: number } = {}): Server {
+export function serveFixtures(options: { port?: number } = {}): Server<undefined> {
   return Bun.serve({
     port: options.port ?? 0,
     fetch(req) {
