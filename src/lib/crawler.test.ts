@@ -10,7 +10,7 @@ import { Database } from "bun:sqlite";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { crawl, groupPages, groupTimeline, recentPages, search } from "./crawler";
+import { crawl, groupPages, groupTimeline, pageLinks, recentPages, search } from "./crawler";
 import type { PageMeta } from "./crawler";
 import { FIXTURES, serveFixtures } from "../../testdata/fixtures";
 
@@ -130,30 +130,31 @@ test("search on missing db returns empty, not an error", () => {
   expect(search(join(tmpdir(), "does-not-exist.db"), "anything")).toHaveLength(0);
 });
 
-test("groupPages categorizes only files by topic, pages excluded", () => {
+test("groupPages categorizes offices, quick links, files by topic", () => {
   const m = {} as PageMeta;
   const rows = [
-    { url: "https://x/offices/default/offices_x?office=Library+Office", status: 200, title: "IIIT-H Offices", meta: m, text: "Library hours: 9am-9pm" },
-    { url: "https://x/offices/default/telephone_directory", status: 200, title: "", meta: m },
+    { url: "https://x/offices/default/offices_x?office=Library+Office", status: 200, title: "IIIT-H Offices", meta: m },
+    { url: "https://x/offices/default/offices_x?office=Admissions+Office", status: 200, title: "IIIT-H Offices", meta: m },
     { url: "https://x/offices/static/files/UG-PG-TuitionFee-18-19.pdf", status: 200, title: "", meta: m },
     { url: "https://x/offices/static/files/List-of-Holidays-2026.pdf", status: 200, title: "", meta: m },
     { url: "https://x/offices/static/files/Form-for-Leave.pdf", status: 200, title: "", meta: m },
     { url: "https://x/offices/static/files/random-thing.pdf", status: 200, title: "", meta: m },
+    { url: "https://x/offices/default/telephone_directory", status: 200, title: "", meta: m },
     { url: "https://x/offices/default/old_events", status: 200, title: "", meta: m },
-    { url: "https://x/offices/static/files/dead.pdf", status: 404, title: "", meta: m },
+    { url: "https://x/offices/dead-link", status: 404, title: "", meta: m },
+    { url: "https://x/other/secret-stuff", status: 200, title: "", meta: m },
   ];
   const groups = groupPages(rows);
   const byId = Object.fromEntries(groups.map((g) => [g.id, g]));
 
-  // Pages are not part of browse — only files.
-  expect(byId.offices).toBeUndefined();
-  expect(byId["quick-links"]).toBeUndefined();
-  expect(byId.misc).toBeUndefined();
+  expect(byId.offices?.items.map((i) => i.title)).toEqual(["Admissions Office", "Library Office"]);
+  expect(byId["quick-links"]?.items.map((i) => i.title)).toEqual(["Old Events", "Telephone Directory"]);
   expect(byId.fees?.items[0]?.title).toBe("UG-PG-TuitionFee-18-19.pdf");
   expect(byId.holidays?.items[0]?.title).toBe("List-of-Holidays-2026.pdf");
   expect(byId.forms?.items[0]?.title).toBe("Form-for-Leave.pdf"); // "Form" word boundary, not "information"
   expect(byId["files-other"]?.items[0]?.title).toBe("random-thing.pdf");
-  expect(byId.fees?.items.some((i) => i.url.includes("dead.pdf"))).toBe(false); // 404s excluded
+  expect(byId.misc?.items[0]?.title).toBe("Secret Stuff");
+  expect(byId.offices?.items.some((i) => i.url.includes("dead-link"))).toBe(false); // 404s excluded
 });
 
 test("groupPages collapses document versions into one entry", () => {
@@ -237,4 +238,15 @@ test("groupTimeline orders entries by month of last-modified, newest first", () 
   expect(all.some((i) => i.url.includes("no-date"))).toBe(false); // no timestamp → excluded
   expect(all.some((i) => i.url.includes("bad"))).toBe(false); // unparseable → excluded
   expect(all.some((i) => i.url.includes("dead"))).toBe(false); // 404 → excluded
+});
+
+test("pageLinks resolves a page's stored links to indexed titles", async () => {
+  await crawl({ baseUrl: server!.url.href, dbPath, maxPages: 100, delayMs: 0 });
+  const links = pageLinks(dbPath, server!.url.href);
+
+  expect(links.some((l) => l.url.includes("/academic"))).toBe(true);
+  expect(links.some((l) => l.url.includes("/admissions"))).toBe(true);
+  expect(links.find((l) => l.url.includes("/academic"))?.title).toBe("Academic Affairs");
+  expect(links.find((l) => l.url.includes("example.com"))).toBeUndefined(); // external links not stored
+  expect(pageLinks(dbPath, `${server!.url.href}does-not-exist`)).toHaveLength(0);
 });

@@ -503,6 +503,14 @@ const FILE_TOPICS: Array<{ id: string; title: string; re: RegExp }> = [
 ];
 const FILE_OTHER = { id: "files-other", title: "Other Documents" };
 
+function humanize(path: string): string {
+  const last = decodeURIComponent(path.split("/").filter(Boolean).pop() ?? path);
+  return last
+    .replace(/[-_]+/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase())
+    .replace(/\.\w+$/, "");
+}
+
 /** Strip version markers from a file name so versions of one document share a
  *  base name: "UG1-Timetable-V3.pdf", "UG1_M24-Timetable_v2.pdf" and
  *  "Almanac_2025-26_Final.pdf" → "ug1 timetable" / "almanac". */
@@ -552,10 +560,13 @@ function collapseVersions(items: BrowseItem[]): BrowseItem[] {
   });
 }
 
-/** Group the indexed files by topic for the Browse tab: every entry is a
- *  direct download link. Pages are not listed here — they stay searchable. */
+/** Group the index for the Browse tab: offices and quick links (each page's
+ *  links are shown in a popup) plus the files as direct download links. */
 export function groupPages(rows: { url: string; status: number; title: string; meta: PageMeta }[]): BrowseGroup[] {
+  const offices: Record<string, BrowseItem[]> = {};
   const files: Record<string, BrowseItem[]> = {};
+  const quick: BrowseItem[] = [];
+  const misc: BrowseItem[] = [];
   for (const row of rows) {
     if (row.status !== 200) continue;
     let u: URL;
@@ -565,19 +576,37 @@ export function groupPages(rows: { url: string; status: number; title: string; m
       continue;
     }
     const path = u.pathname;
-    if (!path.startsWith("/offices/static/files/")) continue;
-    const name = decodeURIComponent(path.split("/").pop() ?? row.url);
-    const topic = FILE_TOPICS.find((t) => t.re.test(name.toLowerCase())) ?? FILE_OTHER;
-    (files[topic.id] ??= []).push({ url: row.url, title: name, meta: row.meta });
+    if (path.startsWith("/offices/default/offices_x")) {
+      const name = decodeURIComponent(u.searchParams.get("office") ?? "Other");
+      (offices[name] ??= []).push({ url: row.url, title: name, meta: row.meta });
+    } else if (path.startsWith("/offices/static/files/")) {
+      const name = decodeURIComponent(path.split("/").pop() ?? row.url);
+      const topic = FILE_TOPICS.find((t) => t.re.test(name.toLowerCase())) ?? FILE_OTHER;
+      (files[topic.id] ??= []).push({ url: row.url, title: name, meta: row.meta });
+    } else if (
+      path === "/offices" || path === "/offices/default" || path === "/offices/default/index" ||
+      path === "/offices/default/old_events" || path === "/offices/default/telephone_directory" ||
+      path === "/offices/default/display_all_files" || path === "/offices/default/search" || path === "/"
+    ) {
+      quick.push({ url: row.url, title: humanize(path), meta: row.meta });
+    } else {
+      misc.push({ url: row.url, title: humanize(path), meta: row.meta });
+    }
   }
   const sortItems = (items: BrowseItem[]) => collapseVersions(items).sort((a, b) => a.title.localeCompare(b.title));
   const groups: BrowseGroup[] = [];
+  const officeNames = Object.keys(offices).sort((a, b) => a.localeCompare(b));
+  if (officeNames.length) {
+    groups.push({ id: "offices", title: "Offices", items: officeNames.flatMap((n) => sortItems(offices[n]!)) });
+  }
+  if (quick.length) groups.push({ id: "quick-links", title: "Quick Links", items: sortItems(quick) });
   for (const t of FILE_TOPICS) {
     if (files[t.id]) groups.push({ id: t.id, title: t.title, items: sortItems(files[t.id]!) });
   }
   if (files[FILE_OTHER.id]) {
     groups.push({ id: FILE_OTHER.id, title: FILE_OTHER.title, items: sortItems(files[FILE_OTHER.id]!) });
   }
+  if (misc.length) groups.push({ id: "misc", title: "Other Pages", items: sortItems(misc) });
   return groups;
 }
 
@@ -670,6 +699,51 @@ export async function timelineIndexPg(): Promise<TimelinePeriod[]> {
       meta: (r.meta ?? {}) as PageMeta,
     })),
   );
+}
+
+export type PageLink = { url: string; title: string; meta: PageMeta };
+
+/** Resolve a page's stored outbound links against the index, preserving the
+ *  order they appeared in on the page. */
+export function pageLinks(dbPath: string, url: string, limit = 100): PageLink[] {
+  if (!existsSync(dbPath)) return [];
+  const db = new Database(dbPath, { readonly: true });
+  try {
+    const row = db.query("SELECT links FROM pages WHERE url = ?").get(url) as { links: string } | null;
+    const targets = (row ? (JSON.parse(row.links) as string[]) : []).slice(0, limit);
+    if (targets.length === 0) return [];
+    const placeholders = targets.map(() => "?").join(",");
+    const rows = db
+      .query(`SELECT url, title, meta FROM pages WHERE url IN (${placeholders})`)
+      .all(...targets) as { url: string; title: string; meta: string }[];
+    const byUrl = new Map(rows.map((r) => [r.url, r]));
+    return targets.flatMap((t) => {
+      const r = byUrl.get(t);
+      return r ? [{ url: r.url, title: r.title, meta: parseMeta(r.meta) }] : [];
+    });
+  } finally {
+    db.close();
+  }
+}
+
+export async function pageLinksIndex(url: string, limit = 100): Promise<PageLink[]> {
+  const pgs = await pg();
+  if (!pgs) return pageLinks(DEFAULT_DB, url, limit);
+  const row = await pgs.query("SELECT links FROM pages WHERE url = $1", [url]);
+  const targets = ((row[0]?.links as string[] | undefined) ?? []).slice(0, limit);
+  if (targets.length === 0) return [];
+  const params = targets.map((_, i) => `$${i + 1}`);
+  const rows = await pgs.query(
+    `SELECT url, title, meta FROM pages WHERE url IN (${params.join(", ")})`,
+    targets,
+  );
+  const byUrl = new Map(rows.map((r) => [String(r.url), r]));
+  return targets.flatMap((t) => {
+    const r = byUrl.get(t);
+    return r
+      ? [{ url: String(r.url), title: String(r.title ?? ""), meta: (r.meta ?? {}) as PageMeta }]
+      : [];
+  });
 }
 
 export function recentPages(dbPath: string, limit = 50): { url: string; title: string; status: number; meta: PageMeta; fetched_at: string }[] {
