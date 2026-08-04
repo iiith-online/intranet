@@ -6,6 +6,9 @@ out
 dist
 *.tgz
 
+# crawl index (runtime artifact)
+index
+
 # code coverage
 coverage
 *.lcov
@@ -32,3 +35,6 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # Finder (MacOS) folder config
 .DS_Store
+
+.vercel
+.env*
