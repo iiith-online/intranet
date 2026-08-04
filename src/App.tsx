@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -14,13 +14,11 @@ type PageMeta = {
 };
 
 type Result = { url: string; title: string; meta: PageMeta; fetched_at: string; snippet: string };
-type Page = { url: string; title: string; status: number; meta: PageMeta; fetched_at: string };
 type BrowseItem = { url: string; title: string; meta: PageMeta; versions?: BrowseItem[] };
 type BrowseGroup = { id: string; title: string; items: BrowseItem[] };
 type TimelineEntry = { url: string; title: string; meta: PageMeta; modified: string };
 type TimelinePeriod = { id: string; label: string; items: TimelineEntry[] };
 type SearchResponse = { query: string; indexed: boolean; results: Result[] };
-type PagesResponse = { pages: Page[] };
 type BrowseResponse = { groups: BrowseGroup[] };
 type TimelineResponse = { periods: TimelinePeriod[] };
 
@@ -92,11 +90,10 @@ function TabButton({
 }
 
 export function App() {
-  const [tab, setTab] = useState<"search" | "browse" | "timeline">("search");
+  const [tab, setTab] = useState<"search" | "browse">("search");
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<Result[] | null>(null);
   const [indexed, setIndexed] = useState<boolean | null>(null);
-  const [pages, setPages] = useState<Page[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [browse, setBrowse] = useState<BrowseGroup[] | null>(null);
   const [browseError, setBrowseError] = useState(false);
@@ -106,20 +103,12 @@ export function App() {
   const [scanState, setScanState] = useState<"idle" | "running" | "done" | "error">("idle");
   const [scanMessage, setScanMessage] = useState("");
 
-  const loadPages = useCallback(() => {
-    fetch("/api/pages")
-      .then((r) => r.json() as Promise<PagesResponse>)
-      .then((d) => setPages(d.pages))
-      .catch(() => setPages([]));
-  }, []);
-
   useEffect(() => {
-    loadPages();
     fetch("/api/scan")
       .then((r) => r.json() as Promise<{ enabled: boolean }>)
       .then((d) => setScanEnabled(d.enabled))
       .catch(() => setScanEnabled(false));
-  }, [loadPages]);
+  }, []);
 
   useEffect(() => {
     if (tab === "browse" && browse === null && !browseError) {
@@ -131,13 +120,13 @@ export function App() {
   }, [tab, browse, browseError]);
 
   useEffect(() => {
-    if (tab === "timeline" && periods === null && !timelineError) {
+    if (periods === null && !timelineError) {
       fetch("/api/timeline")
         .then((r) => r.json() as Promise<TimelineResponse>)
         .then((d) => setPeriods(d.periods))
         .catch(() => setTimelineError(true));
     }
-  }, [tab, periods, timelineError]);
+  }, [periods, timelineError]);
 
   useEffect(() => {
     const q = query.trim();
@@ -183,7 +172,6 @@ export function App() {
           if (s.last?.error) throw new Error(s.last.error);
           setScanState("done");
           setScanMessage(`Scanned: ${s.last?.fetched ?? 0} pages indexed, ${s.last?.failed ?? 0} failed`);
-          loadPages();
           return;
         }
       }
@@ -221,9 +209,6 @@ export function App() {
         <TabButton active={tab === "browse"} onClick={() => setTab("browse")}>
           Browse
         </TabButton>
-        <TabButton active={tab === "timeline"} onClick={() => setTab("timeline")}>
-          Timeline
-        </TabButton>
       </div>
 
       {tab === "search" && (
@@ -254,29 +239,48 @@ export function App() {
             </Card>
           )}
 
-          {results === null && !error && pages.length > 0 && (
-            <section>
-              <h2 className="mb-4 text-lg font-semibold">Indexed pages</h2>
-              <div className="grid gap-3 sm:grid-cols-2">
-                {pages.map((p) => (
-                  <Card key={p.url} className="gap-1 py-4">
-                    <CardHeader className="gap-1 px-4 py-0">
-                      <CardTitle className="text-sm leading-snug">
-                        <a href={p.url} target="_blank" rel="noreferrer" className="hover:underline">
-                          {p.title || fileName(p.url)}
-                        </a>
-                      </CardTitle>
-                    </CardHeader>
-                    <CardContent className="break-all px-4 py-0 text-xs text-muted-foreground">{p.url}</CardContent>
-                    <CardContent className="px-4 py-0 text-xs text-muted-foreground">
-                      {metaLine(p.meta)}
-                      {metaLine(p.meta) && " · "}
-                      Indexed {formatDate(p.fetched_at)}
-                    </CardContent>
-                  </Card>
-                ))}
-              </div>
-            </section>
+          {results === null && !error && (
+            <>
+              {timelineError && (
+                <Card>
+                  <CardContent className="py-8 text-center text-muted-foreground">
+                    Could not load the timeline. Try again later.
+                  </CardContent>
+                </Card>
+              )}
+              {periods === null && !timelineError && <p className="text-muted-foreground">Loading…</p>}
+              {periods !== null && (
+                <div className="space-y-8">
+                  {periods.map((p) => (
+                    <section key={p.id}>
+                      <h2 className="mb-3 flex items-baseline gap-2 text-lg font-semibold">
+                        {p.label}
+                        <span className="text-sm font-normal text-muted-foreground">{p.items.length}</span>
+                      </h2>
+                      <ul className="divide-y rounded-lg border bg-card">
+                        {p.items.map((it) => (
+                          <li key={it.url}>
+                            <a
+                              href={it.url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="flex items-baseline justify-between gap-4 px-4 py-2 hover:bg-accent"
+                            >
+                              <span className="min-w-0 truncate text-sm">{it.title}</span>
+                              <span className="shrink-0 text-xs text-muted-foreground">
+                                {metaLine(it.meta)}
+                                {metaLine(it.meta) && " · "}
+                                {formatDateShort(it.modified)}
+                              </span>
+                            </a>
+                          </li>
+                        ))}
+                      </ul>
+                    </section>
+                  ))}
+                </div>
+              )}
+            </>
           )}
 
           {results !== null && results.length === 0 && !error && (
@@ -397,46 +401,6 @@ export function App() {
                     ))}
                   </ul>
                 )}
-              </section>
-            ))}
-        </div>
-      )}
-      {tab === "timeline" && (
-        <div className="space-y-8">
-          {timelineError && (
-            <Card>
-              <CardContent className="py-8 text-center text-muted-foreground">
-                Could not load the timeline. Try again later.
-              </CardContent>
-            </Card>
-          )}
-          {periods === null && !timelineError && <p className="text-muted-foreground">Loading…</p>}
-          {periods !== null &&
-            periods.map((p) => (
-              <section key={p.id}>
-                <h2 className="mb-3 flex items-baseline gap-2 text-lg font-semibold">
-                  {p.label}
-                  <span className="text-sm font-normal text-muted-foreground">{p.items.length}</span>
-                </h2>
-                <ul className="divide-y rounded-lg border bg-card">
-                  {p.items.map((it) => (
-                    <li key={it.url}>
-                      <a
-                        href={it.url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="flex items-baseline justify-between gap-4 px-4 py-2 hover:bg-accent"
-                      >
-                        <span className="min-w-0 truncate text-sm">{it.title}</span>
-                        <span className="shrink-0 text-xs text-muted-foreground">
-                          {metaLine(it.meta)}
-                          {metaLine(it.meta) && " · "}
-                          {formatDateShort(it.modified)}
-                        </span>
-                      </a>
-                    </li>
-                  ))}
-                </ul>
               </section>
             ))}
         </div>

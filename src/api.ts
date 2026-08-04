@@ -4,7 +4,7 @@
  * same behavior.
  */
 
-import { browseIndexPg, crawl, indexHasPagesIndex, recentPagesIndex, searchIndex, timelineIndexPg } from "./lib/crawler";
+import { browseIndexPg, crawl, indexHasPagesIndex, searchIndex, timelineIndexPg } from "./lib/crawler";
 import type { SearchResult } from "./lib/crawler";
 
 let scanRunning = false;
@@ -29,10 +29,6 @@ export async function handleApiRequest(req: Request): Promise<Response> {
       results = [];
     }
     return Response.json({ query: q, indexed, results });
-  }
-
-  if (path === "/api/pages") {
-    return Response.json({ pages: await recentPagesIndex() });
   }
 
   if (path === "/api/browse") {
