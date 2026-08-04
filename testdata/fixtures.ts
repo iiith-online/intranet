@@ -9,12 +9,13 @@ export const FIXTURES: Record<string, { status: number; type: string; body: stri
   "/": {
     status: 200,
     type: "text/html",
-    body: `<!doctype html><html><head><title>IIIT Intranet</title><meta name="description" content="Campus portal home"></head>
+    body: `<!doctype html><html><head><title>IIIT Intranet</title><meta name="description" content="Campus portal home"><meta name="keywords" content="campus, portal"></head>
       <body><h1>Welcome</h1><p>Find everything about campus life.</p>
       <script>var zzz = "zzzsecretzzz";</script>
       <a href="/academic">Academic</a><a href="/admissions">Admissions</a>
       <a href="/restricted">Restricted</a>
-      <a href="/private">Private</a><a href="/old">Old</a><a href="https://example.com/away">External</a></body></html>`,
+      <a href="/private">Private</a><a href="/old">Old</a>
+      <a href="/files/guide.pdf">Guide</a><a href="https://example.com/away">External</a></body></html>`,
   },
   "/academic": {
     status: 200,
@@ -29,6 +30,11 @@ export const FIXTURES: Record<string, { status: number; type: string; body: stri
   "/restricted": { status: 403, type: "text/plain", body: "forbidden" },
   "/private": { status: 200, type: "text/html", body: `<html><title>Secret</title><body>hidden content</body></html>` },
   "/old": { status: 302, type: "text/plain", body: "" },
+  "/files/guide.pdf": {
+    status: 200,
+    type: "application/pdf",
+    body: "%PDF-1.4 fake pdf body that the crawler must never download fully",
+  },
   "/robots.txt": { status: 200, type: "text/plain", body: "User-agent: *\nDisallow: /private\n" },
 };
 
@@ -42,7 +48,14 @@ export function serveFixtures(options: { port?: number } = {}): Server {
       if (f.status === 302) {
         return new Response("", { status: 302, headers: { location: "/academic" } });
       }
-      return new Response(f.body, { status: f.status, headers: { "content-type": f.type } });
+      return new Response(f.body, {
+        status: f.status,
+        headers: {
+          "content-type": f.type,
+          "content-length": String(new TextEncoder().encode(f.body).length),
+          "last-modified": "Mon, 04 Aug 2025 00:00:00 GMT",
+        },
+      });
     },
   });
 }
