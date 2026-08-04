@@ -10,7 +10,8 @@ import { Database } from "bun:sqlite";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { crawl, recentPages, search } from "./crawler";
+import { crawl, groupPages, recentPages, search } from "./crawler";
+import type { PageMeta } from "./crawler";
 import { FIXTURES, serveFixtures } from "../../testdata/fixtures";
 
 let server: Server<undefined> | null = null;
@@ -126,4 +127,31 @@ test("garbage query falls back to LIKE without throwing", async () => {
 
 test("search on missing db returns empty, not an error", () => {
   expect(search(join(tmpdir(), "does-not-exist.db"), "anything")).toHaveLength(0);
+});
+
+test("groupPages categorizes offices, files by topic, and quick links", () => {
+  const m = {} as PageMeta;
+  const rows = [
+    { url: "https://x/offices/default/offices_x?office=Library+Office", status: 200, title: "IIIT-H Offices", meta: m },
+    { url: "https://x/offices/default/offices_x?office=Admissions+Office", status: 200, title: "IIIT-H Offices", meta: m },
+    { url: "https://x/offices/static/files/UG-PG-TuitionFee-18-19.pdf", status: 200, title: "", meta: m },
+    { url: "https://x/offices/static/files/List-of-Holidays-2026.pdf", status: 200, title: "", meta: m },
+    { url: "https://x/offices/static/files/Form-for-Leave.pdf", status: 200, title: "", meta: m },
+    { url: "https://x/offices/static/files/random-thing.pdf", status: 200, title: "", meta: m },
+    { url: "https://x/offices/default/telephone_directory", status: 200, title: "", meta: m },
+    { url: "https://x/offices/default/old_events", status: 200, title: "", meta: m },
+    { url: "https://x/offices/dead-link", status: 404, title: "", meta: m },
+    { url: "https://x/other/secret-stuff", status: 200, title: "", meta: m },
+  ];
+  const groups = groupPages(rows);
+  const byId = Object.fromEntries(groups.map((g) => [g.id, g]));
+
+  expect(byId.offices?.items.map((i) => i.title)).toEqual(["Admissions Office", "Library Office"]);
+  expect(byId["quick-links"]?.items.map((i) => i.title)).toEqual(["Old Events", "Telephone Directory"]);
+  expect(byId.fees?.items[0]?.title).toBe("UG-PG-TuitionFee-18-19.pdf");
+  expect(byId.holidays?.items[0]?.title).toBe("List-of-Holidays-2026.pdf");
+  expect(byId.forms?.items[0]?.title).toBe("Form-for-Leave.pdf"); // "Form" word boundary, not "information"
+  expect(byId["files-other"]?.items[0]?.title).toBe("random-thing.pdf");
+  expect(byId.misc?.items[0]?.title).toBe("Secret Stuff");
+  expect(byId.offices?.items.some((i) => i.url.includes("dead-link"))).toBe(false); // 404s excluded
 });

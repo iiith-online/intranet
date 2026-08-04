@@ -15,8 +15,11 @@ type PageMeta = {
 
 type Result = { url: string; title: string; meta: PageMeta; fetched_at: string; snippet: string };
 type Page = { url: string; title: string; status: number; meta: PageMeta; fetched_at: string };
+type BrowseItem = { url: string; title: string; meta: PageMeta };
+type BrowseGroup = { id: string; title: string; items: BrowseItem[] };
 type SearchResponse = { query: string; indexed: boolean; results: Result[] };
 type PagesResponse = { pages: Page[] };
+type BrowseResponse = { groups: BrowseGroup[] };
 
 function formatDate(iso: string): string {
   const d = new Date(iso);
@@ -59,12 +62,36 @@ function metaLine(m: PageMeta): string {
   return "";
 }
 
+function TabButton({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`rounded-md px-4 py-2 text-sm font-medium transition-colors ${
+        active ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
 export function App() {
+  const [tab, setTab] = useState<"search" | "browse">("search");
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<Result[] | null>(null);
   const [indexed, setIndexed] = useState<boolean | null>(null);
   const [pages, setPages] = useState<Page[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [browse, setBrowse] = useState<BrowseGroup[] | null>(null);
+  const [browseError, setBrowseError] = useState(false);
   const [scanEnabled, setScanEnabled] = useState(false);
   const [scanState, setScanState] = useState<"idle" | "running" | "done" | "error">("idle");
   const [scanMessage, setScanMessage] = useState("");
@@ -83,6 +110,15 @@ export function App() {
       .then((d) => setScanEnabled(d.enabled))
       .catch(() => setScanEnabled(false));
   }, [loadPages]);
+
+  useEffect(() => {
+    if (tab === "browse" && browse === null && !browseError) {
+      fetch("/api/browse")
+        .then((r) => r.json() as Promise<BrowseResponse>)
+        .then((d) => setBrowse(d.groups))
+        .catch(() => setBrowseError(true));
+    }
+  }, [tab, browse, browseError]);
 
   useEffect(() => {
     const q = query.trim();
@@ -140,7 +176,7 @@ export function App() {
 
   return (
     <div className="mx-auto min-h-screen w-full max-w-4xl px-6 py-10">
-      <header className="mb-10 flex items-center gap-4">
+      <header className="mb-8 flex items-center gap-4">
         <img src={logoUrl} alt="IIIT" className="h-14 w-14 rounded-xl object-cover shadow-sm" />
         <div>
           <h1 className="text-2xl font-bold tracking-tight">IIIT Intranet Index</h1>
@@ -159,90 +195,156 @@ export function App() {
         )}
       </header>
 
-      <form
-        className="mb-10 flex gap-2"
-        onSubmit={(e) => {
-          e.preventDefault();
-          setQuery(query.trim());
-        }}
-        role="search"
-      >
-        <Input
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search the intranet…"
-          className="h-11 text-base"
-          autoFocus
-        />
-        <Button type="submit" className="h-11 px-6">
+      <div className="mb-8 flex gap-1 rounded-lg border bg-muted/40 p-1 w-fit">
+        <TabButton active={tab === "search"} onClick={() => setTab("search")}>
           Search
-        </Button>
-      </form>
+        </TabButton>
+        <TabButton active={tab === "browse"} onClick={() => setTab("browse")}>
+          Browse
+        </TabButton>
+      </div>
 
-      {error && (
-        <Card className="mb-6 border-destructive/40">
-          <CardContent className="py-4 text-destructive">{error}</CardContent>
-        </Card>
+      {tab === "search" && (
+        <>
+          <form
+            className="mb-10 flex gap-2"
+            onSubmit={(e) => {
+              e.preventDefault();
+              setQuery(query.trim());
+            }}
+            role="search"
+          >
+            <Input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search the intranet…"
+              className="h-11 text-base"
+              autoFocus
+            />
+            <Button type="submit" className="h-11 px-6">
+              Search
+            </Button>
+          </form>
+
+          {error && (
+            <Card className="mb-6 border-destructive/40">
+              <CardContent className="py-4 text-destructive">{error}</CardContent>
+            </Card>
+          )}
+
+          {results === null && !error && pages.length > 0 && (
+            <section>
+              <h2 className="mb-4 text-lg font-semibold">Indexed pages</h2>
+              <div className="grid gap-3 sm:grid-cols-2">
+                {pages.map((p) => (
+                  <Card key={p.url} className="gap-1 py-4">
+                    <CardHeader className="gap-1 px-4 py-0">
+                      <CardTitle className="text-sm leading-snug">
+                        <a href={p.url} target="_blank" rel="noreferrer" className="hover:underline">
+                          {p.title || fileName(p.url)}
+                        </a>
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent className="break-all px-4 py-0 text-xs text-muted-foreground">{p.url}</CardContent>
+                    <CardContent className="px-4 py-0 text-xs text-muted-foreground">
+                      {metaLine(p.meta)}
+                      {metaLine(p.meta) && " · "}
+                      Indexed {formatDate(p.fetched_at)}
+                    </CardContent>
+                  </Card>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {results !== null && results.length === 0 && !error && (
+            <Card>
+              <CardContent className="py-8 text-center text-muted-foreground">
+                {indexed === false
+                  ? "No index yet. Run `bun run crawl` on the campus network (or point DATABASE_URL at the shared Postgres)."
+                  : `No results for “${query.trim()}”.`}
+              </CardContent>
+            </Card>
+          )}
+
+          {results !== null && results.length > 0 && (
+            <ul className="space-y-4">
+              {results.map((r) => (
+                <li key={r.url}>
+                  <Card className="gap-2 py-4">
+                    <CardHeader className="gap-1 px-4 py-0">
+                      <CardTitle className="text-base">
+                        <a href={r.url} target="_blank" rel="noreferrer" className="text-primary hover:underline">
+                          {r.title || fileName(r.url)}
+                        </a>
+                      </CardTitle>
+                      <CardDescription className="break-all">{r.url}</CardDescription>
+                    </CardHeader>
+                    <CardContent className="px-4 py-0">
+                      <p className="text-sm text-muted-foreground">
+                        {r.meta?.kind === "html" ? r.snippet || metaLine(r.meta) : metaLine(r.meta)}
+                      </p>
+                      <p className="mt-2 text-xs text-muted-foreground">Indexed {formatDate(r.fetched_at)}</p>
+                    </CardContent>
+                  </Card>
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
       )}
 
-      {results === null && !error && pages.length > 0 && (
-        <section>
-          <h2 className="mb-4 text-lg font-semibold">Indexed pages</h2>
-          <div className="grid gap-3 sm:grid-cols-2">
-            {pages.map((p) => (
-              <Card key={p.url} className="gap-1 py-4">
-                <CardHeader className="gap-1 px-4 py-0">
-                  <CardTitle className="text-sm leading-snug">
-                    <a href={p.url} target="_blank" rel="noreferrer" className="hover:underline">
-                      {p.title || fileName(p.url)}
-                    </a>
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="break-all px-4 py-0 text-xs text-muted-foreground">{p.url}</CardContent>
-                <CardContent className="px-4 py-0 text-xs text-muted-foreground">
-                  {metaLine(p.meta)}
-                  {metaLine(p.meta) && " · "}
-                  Indexed {formatDate(p.fetched_at)}
-                </CardContent>
-              </Card>
+      {tab === "browse" && (
+        <div className="space-y-8">
+          {browseError && (
+            <Card>
+              <CardContent className="py-8 text-center text-muted-foreground">
+                Could not load the directory. Try again later.
+              </CardContent>
+            </Card>
+          )}
+          {browse === null && !browseError && <p className="text-muted-foreground">Loading…</p>}
+          {browse !== null &&
+            browse.map((g) => (
+              <section key={g.id}>
+                <h2 className="mb-3 flex items-baseline gap-2 text-lg font-semibold">
+                  {g.title}
+                  <span className="text-sm font-normal text-muted-foreground">{g.items.length}</span>
+                </h2>
+                {g.id === "offices" ? (
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {g.items.map((it) => (
+                      <a
+                        key={it.url}
+                        href={it.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="rounded-md border bg-card px-4 py-3 text-sm font-medium hover:bg-accent hover:text-accent-foreground"
+                      >
+                        {it.title}
+                      </a>
+                    ))}
+                  </div>
+                ) : (
+                  <ul className="divide-y rounded-lg border bg-card">
+                    {g.items.map((it) => (
+                      <li key={it.url}>
+                        <a
+                          href={it.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="flex items-baseline justify-between gap-4 px-4 py-2 hover:bg-accent"
+                        >
+                          <span className="min-w-0 truncate text-sm">{it.title}</span>
+                          <span className="shrink-0 text-xs text-muted-foreground">{metaLine(it.meta)}</span>
+                        </a>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </section>
             ))}
-          </div>
-        </section>
-      )}
-
-      {results !== null && results.length === 0 && !error && (
-        <Card>
-          <CardContent className="py-8 text-center text-muted-foreground">
-            {indexed === false
-              ? "No index yet. Run `bun run crawl` on the campus network (or point DATABASE_URL at the shared Postgres)."
-              : `No results for “${query.trim()}”.`}
-          </CardContent>
-        </Card>
-      )}
-
-      {results !== null && results.length > 0 && (
-        <ul className="space-y-4">
-          {results.map((r) => (
-            <li key={r.url}>
-              <Card className="gap-2 py-4">
-                <CardHeader className="gap-1 px-4 py-0">
-                  <CardTitle className="text-base">
-                    <a href={r.url} target="_blank" rel="noreferrer" className="text-primary hover:underline">
-                      {r.title || fileName(r.url)}
-                    </a>
-                  </CardTitle>
-                  <CardDescription className="break-all">{r.url}</CardDescription>
-                </CardHeader>
-                <CardContent className="px-4 py-0">
-                  <p className="text-sm text-muted-foreground">
-                    {r.meta?.kind === "html" ? r.snippet || metaLine(r.meta) : metaLine(r.meta)}
-                  </p>
-                  <p className="mt-2 text-xs text-muted-foreground">Indexed {formatDate(r.fetched_at)}</p>
-                </CardContent>
-              </Card>
-            </li>
-          ))}
-        </ul>
+        </div>
       )}
     </div>
   );
