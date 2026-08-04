@@ -14,7 +14,7 @@ type PageMeta = {
 };
 
 type Result = { url: string; title: string; meta: PageMeta; fetched_at: string; snippet: string };
-type BrowseItem = { url: string; title: string; meta: PageMeta; text?: string; versions?: BrowseItem[] };
+type BrowseItem = { url: string; title: string; meta: PageMeta; versions?: BrowseItem[] };
 type BrowseGroup = { id: string; title: string; items: BrowseItem[] };
 type TimelineEntry = { url: string; title: string; meta: PageMeta; modified: string };
 type TimelinePeriod = { id: string; label: string; items: TimelineEntry[] };
@@ -337,101 +337,54 @@ export function App() {
                   {g.title}
                   <span className="text-sm font-normal text-muted-foreground">{g.items.length}</span>
                 </h2>
-                {g.id === "offices" ? (
-                  <div className="grid gap-2 sm:grid-cols-2">
-                    {g.items.map((it) => (
-                      <div key={it.url} className="rounded-md border bg-card px-4 py-3">
+                <ul className="divide-y rounded-lg border bg-card">
+                  {g.items.map((it) => (
+                    <li key={it.url}>
+                      {it.versions ? (
+                        <details className="px-4 py-2 group">
+                          <summary className="flex cursor-pointer list-none items-baseline justify-between gap-4">
+                            <span className="min-w-0 truncate text-sm font-medium">{it.title}</span>
+                            <span className="shrink-0 text-xs text-muted-foreground">
+                              {it.versions.length} versions
+                            </span>
+                          </summary>
+                          <ul className="mt-2 space-y-1 border-t pt-2">
+                            {it.versions.map((v) => (
+                              <li key={v.url} className="flex items-baseline justify-between gap-4 pl-2 text-xs">
+                                <a
+                                  href={v.url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="min-w-0 truncate hover:underline"
+                                >
+                                  {v.title}
+                                </a>
+                                <span className="shrink-0 text-muted-foreground">
+                                  {formatSize(v.meta.contentLength)}
+                                  {v.meta.lastModified &&
+                                    ` · ${new Date(v.meta.lastModified).toLocaleDateString(undefined, {
+                                      month: "short",
+                                      year: "numeric",
+                                    })}`}
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                        </details>
+                      ) : (
                         <a
                           href={it.url}
                           target="_blank"
                           rel="noreferrer"
-                          className="text-sm font-medium hover:underline"
+                          className="flex items-baseline justify-between gap-4 px-4 py-2 hover:bg-accent"
                         >
-                          {it.title}
+                          <span className="min-w-0 truncate text-sm">{it.title}</span>
+                          <span className="shrink-0 text-xs text-muted-foreground">{metaLine(it.meta)}</span>
                         </a>
-                        {it.text && (
-                          <details className="mt-1">
-                            <summary className="cursor-pointer list-none text-xs text-muted-foreground hover:text-foreground">
-                              Show content
-                            </summary>
-                            <div className="mt-2 max-h-64 overflow-y-auto whitespace-pre-wrap text-xs leading-relaxed text-muted-foreground">
-                              {it.text}
-                            </div>
-                          </details>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <ul className="divide-y rounded-lg border bg-card">
-                    {g.items.map((it) => (
-                      <li key={it.url}>
-                        {it.versions ? (
-                          <details className="px-4 py-2 group">
-                            <summary className="flex cursor-pointer list-none items-baseline justify-between gap-4">
-                              <span className="min-w-0 truncate text-sm font-medium">{it.title}</span>
-                              <span className="shrink-0 text-xs text-muted-foreground">
-                                {it.versions.length} versions
-                              </span>
-                            </summary>
-                            <ul className="mt-2 space-y-1 border-t pt-2">
-                              {it.versions.map((v) => (
-                                <li key={v.url} className="flex items-baseline justify-between gap-4 pl-2 text-xs">
-                                  <a
-                                    href={v.url}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    className="min-w-0 truncate hover:underline"
-                                  >
-                                    {v.title}
-                                  </a>
-                                  <span className="shrink-0 text-muted-foreground">
-                                    {formatSize(v.meta.contentLength)}
-                                    {v.meta.lastModified &&
-                                      ` · ${new Date(v.meta.lastModified).toLocaleDateString(undefined, {
-                                        month: "short",
-                                        year: "numeric",
-                                      })}`}
-                                  </span>
-                                </li>
-                              ))}
-                            </ul>
-                          </details>
-                        ) : it.text ? (
-                          <div className="px-4 py-2">
-                            <a
-                              href={it.url}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="flex items-baseline justify-between gap-4 hover:underline"
-                            >
-                              <span className="min-w-0 truncate text-sm">{it.title}</span>
-                              <span className="shrink-0 text-xs text-muted-foreground">{metaLine(it.meta)}</span>
-                            </a>
-                            <details className="mt-1">
-                              <summary className="cursor-pointer list-none text-xs text-muted-foreground hover:text-foreground">
-                                Show content
-                              </summary>
-                              <div className="mt-2 max-h-72 overflow-y-auto whitespace-pre-wrap text-xs leading-relaxed text-muted-foreground">
-                                {it.text}
-                              </div>
-                            </details>
-                          </div>
-                        ) : (
-                          <a
-                            href={it.url}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="flex items-baseline justify-between gap-4 px-4 py-2 hover:bg-accent"
-                          >
-                            <span className="min-w-0 truncate text-sm">{it.title}</span>
-                            <span className="shrink-0 text-xs text-muted-foreground">{metaLine(it.meta)}</span>
-                          </a>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
-                )}
+                      )}
+                    </li>
+                  ))}
+                </ul>
               </section>
             ))}
         </div>
