@@ -485,7 +485,7 @@ export function search(dbPath: string, query: string, limit = 20): SearchResult[
   }
 }
 
-export type BrowseItem = { url: string; title: string; meta: PageMeta; versions?: BrowseItem[] };
+export type BrowseItem = { url: string; title: string; meta: PageMeta; text?: string; versions?: BrowseItem[] };
 export type BrowseGroup = { id: string; title: string; items: BrowseItem[] };
 
 const FILE_TOPICS: Array<{ id: string; title: string; re: RegExp }> = [
@@ -561,12 +561,14 @@ function collapseVersions(items: BrowseItem[]): BrowseItem[] {
 }
 
 /** Group indexed pages the way the original intranet presents them (offices,
- *  quick links, documents by topic) — but with counts and cleaner labels. */
-export function groupPages(rows: { url: string; status: number; title: string; meta: PageMeta }[]): BrowseGroup[] {
+ *  quick links, documents by topic) — but with counts, cleaner labels and the
+ *  pages' own text inline (so the browse view is self-contained). */
+export function groupPages(rows: { url: string; status: number; title: string; meta: PageMeta; text?: string }[]): BrowseGroup[] {
   const offices: Record<string, BrowseItem[]> = {};
   const files: Record<string, BrowseItem[]> = {};
   const quick: BrowseItem[] = [];
   const misc: BrowseItem[] = [];
+  const pageText = (row: { text?: string }) => (row.text ? row.text.slice(0, 8000) : undefined);
   for (const row of rows) {
     if (row.status !== 200) continue;
     let u: URL;
@@ -578,7 +580,7 @@ export function groupPages(rows: { url: string; status: number; title: string; m
     const path = u.pathname;
     if (path.startsWith("/offices/default/offices_x")) {
       const name = decodeURIComponent(u.searchParams.get("office") ?? "Other");
-      (offices[name] ??= []).push({ url: row.url, title: name, meta: row.meta });
+      (offices[name] ??= []).push({ url: row.url, title: name, meta: row.meta, text: pageText(row) });
     } else if (path.startsWith("/offices/static/files/")) {
       const name = decodeURIComponent(path.split("/").pop() ?? row.url);
       const topic = FILE_TOPICS.find((t) => t.re.test(name.toLowerCase())) ?? FILE_OTHER;
@@ -588,9 +590,9 @@ export function groupPages(rows: { url: string; status: number; title: string; m
       path === "/offices/default/old_events" || path === "/offices/default/telephone_directory" ||
       path === "/offices/default/display_all_files" || path === "/offices/default/search" || path === "/"
     ) {
-      quick.push({ url: row.url, title: humanize(path), meta: row.meta });
+      quick.push({ url: row.url, title: humanize(path), meta: row.meta, text: pageText(row) });
     } else {
-      misc.push({ url: row.url, title: humanize(path), meta: row.meta });
+      misc.push({ url: row.url, title: humanize(path), meta: row.meta, text: pageText(row) });
     }
   }
   const sortItems = (items: BrowseItem[]) => collapseVersions(items).sort((a, b) => a.title.localeCompare(b.title));
@@ -615,9 +617,11 @@ export function browseIndex(dbPath: string = DEFAULT_DB): BrowseGroup[] {
   const db = new Database(dbPath, { readonly: true });
   try {
     const rows = db
-      .query("SELECT url, status, title, meta FROM pages")
-      .all() as { url: string; status: number; title: string; meta: string }[];
-    return groupPages(rows.map((r) => ({ url: r.url, status: r.status, title: r.title, meta: parseMeta(r.meta) })));
+      .query("SELECT url, status, title, meta, text FROM pages")
+      .all() as { url: string; status: number; title: string; meta: string; text: string }[];
+    return groupPages(
+      rows.map((r) => ({ url: r.url, status: r.status, title: r.title, meta: parseMeta(r.meta), text: r.text })),
+    );
   } finally {
     db.close();
   }
@@ -626,13 +630,14 @@ export function browseIndex(dbPath: string = DEFAULT_DB): BrowseGroup[] {
 export async function browseIndexPg(): Promise<BrowseGroup[]> {
   const pgs = await pg();
   if (!pgs) return browseIndex();
-  const rows = await pgs.query("SELECT url, status, title, meta FROM pages");
+  const rows = await pgs.query("SELECT url, status, title, meta, text FROM pages");
   return groupPages(
     rows.map((r) => ({
       url: String(r.url),
       status: Number(r.status),
       title: String(r.title ?? ""),
       meta: (r.meta ?? {}) as PageMeta,
+      text: r.text ? String(r.text) : undefined,
     })),
   );
 }

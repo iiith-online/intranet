@@ -133,7 +133,7 @@ test("search on missing db returns empty, not an error", () => {
 test("groupPages categorizes offices, files by topic, and quick links", () => {
   const m = {} as PageMeta;
   const rows = [
-    { url: "https://x/offices/default/offices_x?office=Library+Office", status: 200, title: "IIIT-H Offices", meta: m },
+    { url: "https://x/offices/default/offices_x?office=Library+Office", status: 200, title: "IIIT-H Offices", meta: m, text: "Library hours: 9am-9pm" },
     { url: "https://x/offices/default/offices_x?office=Admissions+Office", status: 200, title: "IIIT-H Offices", meta: m },
     { url: "https://x/offices/static/files/UG-PG-TuitionFee-18-19.pdf", status: 200, title: "", meta: m },
     { url: "https://x/offices/static/files/List-of-Holidays-2026.pdf", status: 200, title: "", meta: m },
@@ -148,6 +148,8 @@ test("groupPages categorizes offices, files by topic, and quick links", () => {
   const byId = Object.fromEntries(groups.map((g) => [g.id, g]));
 
   expect(byId.offices?.items.map((i) => i.title)).toEqual(["Admissions Office", "Library Office"]);
+  expect(byId.offices?.items.find((i) => i.title === "Library Office")?.text).toContain("Library hours");
+  expect(byId.fees?.items[0]?.text).toBeUndefined(); // files carry no text
   expect(byId["quick-links"]?.items.map((i) => i.title)).toEqual(["Old Events", "Telephone Directory"]);
   expect(byId.fees?.items[0]?.title).toBe("UG-PG-TuitionFee-18-19.pdf");
   expect(byId.holidays?.items[0]?.title).toBe("List-of-Holidays-2026.pdf");
