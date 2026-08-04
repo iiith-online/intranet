@@ -416,7 +416,7 @@ export function search(dbPath: string, query: string, limit = 20): SearchResult[
   }
 }
 
-export type BrowseItem = { url: string; title: string; meta: PageMeta };
+export type BrowseItem = { url: string; title: string; meta: PageMeta; versions?: BrowseItem[] };
 export type BrowseGroup = { id: string; title: string; items: BrowseItem[] };
 
 const FILE_TOPICS: Array<{ id: string; title: string; re: RegExp }> = [
@@ -440,6 +440,55 @@ function humanize(path: string): string {
     .replace(/[-_]+/g, " ")
     .replace(/\b\w/g, (c) => c.toUpperCase())
     .replace(/\.\w+$/, "");
+}
+
+/** Strip version markers from a file name so versions of one document share a
+ *  base name: "UG1-Timetable-V3.pdf", "UG1_M24-Timetable_v2.pdf" and
+ *  "Almanac_2025-26_Final.pdf" → "ug1 timetable" / "almanac". */
+function baseName(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/\.\w+$/, "")
+    .replace(/[-_ ]?(\(?\s*v(?:er)?\.?\s*\d+(\.\d+)?\)?|revised\d*|final\d*|updated\d*|new|latest|draft\d*)/g, "")
+    .replace(/[-_ ]?(?:19|20)\d{2}[-_/]?\d{0,2}\b/g, "")
+    .replace(/[-_ ]?(as[ -]?of)?[-_ ]?(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*[-_ ]?(\d{1,2})?/g, "")
+    .replace(/[-_ ]?(monsoon|spring|summer|winter)[-_ ]?(?:19|20)?\d{0,2}\b/g, "")
+    .replace(/(?:^|[-_ ])[ms]\d{2}(?=[-_ ]|$)/g, "")
+    .replace(/[-_ ]?\(\d+\)/g, "")
+    .replace(/[-_ ]?\byear\b/g, "")
+    .replace(/[-_ ]+/g, " ")
+    .trim();
+}
+
+const VERSION_MARKERS = /[-_ ]?(\(?\s*v(?:er)?\.?\s*\d+(\.\d+)?\)?|revised\d*|final\d*|updated\d*|new|latest|draft\d*)/gi;
+const DATE_MARKERS = /[-_ ]?(?:19|20)\d{2}[-_/]?\d{0,2}\b|[-_ ]?(as[ -]?of)?[-_ ]?(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*[-_ ]?(\d{1,2})?|[-_ ]?\byear\b/gi;
+
+/** Merge documents that differ only by version markers into one entry whose
+ *  `versions` lists the real files. The entry title is the cleanest (shortest)
+ *  original name with version/date markers stripped. */
+function collapseVersions(items: BrowseItem[]): BrowseItem[] {
+  const byBase = new Map<string, BrowseItem[]>();
+  for (const it of items) {
+    const base = baseName(it.title);
+    const list = byBase.get(base) ?? [];
+    list.push(it);
+    byBase.set(base, list);
+  }
+  return [...byBase.values()].map((list) => {
+    const sorted = [...list].sort((a, b) => a.title.localeCompare(b.title));
+    if (sorted.length === 1) return sorted[0]!;
+    const cleanest = sorted.reduce((a, b) => (b.title.length < a.title.length ? b : a));
+    const title =
+      cleanest.title
+        .replace(/\.\w+$/, "")
+        .replace(VERSION_MARKERS, "")
+        .replace(DATE_MARKERS, "")
+        .replace(/[-_ ]?(monsoon|spring|summer|winter)[-_ ]?(?:19|20)?\d{0,2}\b/gi, "")
+        .replace(/(?:^|[-_ ])[ms]\d{2}(?=[-_ ]|$)/gi, "")
+        .replace(/[-_ ]+/g, " ")
+        .trim() || cleanest.title;
+    return { url: cleanest.url, title, meta: cleanest.meta, versions: sorted };
+  });
 }
 
 /** Group indexed pages the way the original intranet presents them (offices,
@@ -475,7 +524,7 @@ export function groupPages(rows: { url: string; status: number; title: string; m
       misc.push({ url: row.url, title: humanize(path), meta: row.meta });
     }
   }
-  const sortItems = (items: BrowseItem[]) => [...items].sort((a, b) => a.title.localeCompare(b.title));
+  const sortItems = (items: BrowseItem[]) => collapseVersions(items).sort((a, b) => a.title.localeCompare(b.title));
   const groups: BrowseGroup[] = [];
   const officeNames = Object.keys(offices).sort((a, b) => a.localeCompare(b));
   if (officeNames.length) {

@@ -155,3 +155,59 @@ test("groupPages categorizes offices, files by topic, and quick links", () => {
   expect(byId.misc?.items[0]?.title).toBe("Secret Stuff");
   expect(byId.offices?.items.some((i) => i.url.includes("dead-link"))).toBe(false); // 404s excluded
 });
+
+test("groupPages collapses document versions into one entry", () => {
+  const m = {} as PageMeta;
+  const rows = [
+    { url: "https://x/offices/static/files/UG1-Timetable-V1.pdf", status: 200, title: "", meta: m },
+    { url: "https://x/offices/static/files/UG1-Timetable-V2.pdf", status: 200, title: "", meta: m },
+    { url: "https://x/offices/static/files/UG1-Timetable-V3.pdf", status: 200, title: "", meta: m },
+    { url: "https://x/offices/static/files/List_of_Holidays_2017_revised.pdf", status: 200, title: "", meta: m },
+    { url: "https://x/offices/static/files/List of Holidays - Year 2026.pdf", status: 200, title: "", meta: m },
+    { url: "https://x/offices/static/files/UG1-T3-Tut-Lab-Schedule.pdf", status: 200, title: "", meta: m },
+    { url: "https://x/offices/static/files/UG1-Tut-Schedule-S19-V1.pdf", status: 200, title: "", meta: m },
+  ];
+  const groups = groupPages(rows);
+  const timetables = groups.find((g) => g.id === "timetables")!;
+
+  const tt = timetables.items.find((i) => i.title.includes("Timetable"));
+  expect(tt?.versions?.length).toBe(3); // V1 + V2 + V3 collapsed
+  expect(tt?.versions?.map((v) => v.title)).toEqual([
+    "UG1-Timetable-V1.pdf",
+    "UG1-Timetable-V2.pdf",
+    "UG1-Timetable-V3.pdf",
+  ]);
+
+  const holidays = groups.find((g) => g.id === "holidays")!;
+  expect(holidays.items).toHaveLength(1); // year + "revised" markers stripped
+  expect(holidays.items[0]?.versions?.length).toBe(2);
+
+  // Different documents must NOT merge.
+  const tutLab = timetables.items.find((i) => i.title.includes("Tut-Lab"));
+  expect(tutLab).toBeDefined();
+  const s19 = timetables.items.find((i) => i.title.includes("S19"));
+  expect(s19).toBeDefined();
+  expect(timetables.items).toHaveLength(3);
+});
+
+test("groupPages collapses batch-coded and date-stamped documents", () => {
+  const m = {} as PageMeta;
+  const rows = [
+    { url: "https://x/offices/static/files/UG1-Timetable-V1.pdf", status: 200, title: "", meta: m },
+    { url: "https://x/offices/static/files/UG1_M24-Timetable-V3.pdf", status: 200, title: "", meta: m },
+    { url: "https://x/offices/static/files/Almanac_2025-26.docx", status: 200, title: "", meta: m },
+    { url: "https://x/offices/static/files/Almanac_M25_Final-Ver2.1.pdf", status: 200, title: "", meta: m },
+    { url: "https://x/offices/static/files/Almanac_S25-Final.pdf", status: 200, title: "", meta: m },
+    { url: "https://x/offices/static/files/Non-UG1_Courses_Lecture_Timetable_M24-V7.pdf", status: 200, title: "", meta: m },
+  ];
+  const groups = groupPages(rows);
+  const timetables = groups.find((g) => g.id === "timetables")!;
+
+  const tt = timetables.items.find((i) => i.title.includes("Timetable") && !i.title.includes("Lecture"));
+  expect(tt?.versions?.length).toBe(2); // V1 + M24 batch variant
+  const almanac = timetables.items.find((i) => i.title.includes("Almanac"));
+  expect(almanac?.versions?.length).toBe(3); // year range + batch codes + Final-Ver2.1
+  expect(almanac?.title).toBe("Almanac");
+  const nonUg1 = timetables.items.find((i) => i.title.includes("Non-UG1"));
+  expect(nonUg1?.versions).toBeUndefined(); // a genuinely different document
+});

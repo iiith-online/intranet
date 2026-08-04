@@ -329,15 +329,48 @@ export function App() {
                   <ul className="divide-y rounded-lg border bg-card">
                     {g.items.map((it) => (
                       <li key={it.url}>
-                        <a
-                          href={it.url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="flex items-baseline justify-between gap-4 px-4 py-2 hover:bg-accent"
-                        >
-                          <span className="min-w-0 truncate text-sm">{it.title}</span>
-                          <span className="shrink-0 text-xs text-muted-foreground">{metaLine(it.meta)}</span>
-                        </a>
+                        {it.versions ? (
+                          <details className="px-4 py-2 group">
+                            <summary className="flex cursor-pointer list-none items-baseline justify-between gap-4">
+                              <span className="min-w-0 truncate text-sm font-medium">{it.title}</span>
+                              <span className="shrink-0 text-xs text-muted-foreground">
+                                {it.versions.length} versions
+                              </span>
+                            </summary>
+                            <ul className="mt-2 space-y-1 border-t pt-2">
+                              {it.versions.map((v) => (
+                                <li key={v.url} className="flex items-baseline justify-between gap-4 pl-2 text-xs">
+                                  <a
+                                    href={v.url}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="min-w-0 truncate hover:underline"
+                                  >
+                                    {v.title}
+                                  </a>
+                                  <span className="shrink-0 text-muted-foreground">
+                                    {formatSize(v.meta.contentLength)}
+                                    {v.meta.lastModified &&
+                                      ` · ${new Date(v.meta.lastModified).toLocaleDateString(undefined, {
+                                        month: "short",
+                                        year: "numeric",
+                                      })}`}
+                                  </span>
+                                </li>
+                              ))}
+                            </ul>
+                          </details>
+                        ) : (
+                          <a
+                            href={it.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="flex items-baseline justify-between gap-4 px-4 py-2 hover:bg-accent"
+                          >
+                            <span className="min-w-0 truncate text-sm">{it.title}</span>
+                            <span className="shrink-0 text-xs text-muted-foreground">{metaLine(it.meta)}</span>
+                          </a>
+                        )}
                       </li>
                     ))}
                   </ul>
