@@ -701,51 +701,6 @@ export async function timelineIndexPg(): Promise<TimelinePeriod[]> {
   );
 }
 
-export type PageLink = { url: string; title: string; meta: PageMeta };
-
-/** Resolve a page's stored outbound links against the index, preserving the
- *  order they appeared in on the page. */
-export function pageLinks(dbPath: string, url: string, limit = 100): PageLink[] {
-  if (!existsSync(dbPath)) return [];
-  const db = new Database(dbPath, { readonly: true });
-  try {
-    const row = db.query("SELECT links FROM pages WHERE url = ?").get(url) as { links: string } | null;
-    const targets = (row ? (JSON.parse(row.links) as string[]) : []).slice(0, limit);
-    if (targets.length === 0) return [];
-    const placeholders = targets.map(() => "?").join(",");
-    const rows = db
-      .query(`SELECT url, title, meta FROM pages WHERE url IN (${placeholders})`)
-      .all(...targets) as { url: string; title: string; meta: string }[];
-    const byUrl = new Map(rows.map((r) => [r.url, r]));
-    return targets.flatMap((t) => {
-      const r = byUrl.get(t);
-      return r ? [{ url: r.url, title: r.title, meta: parseMeta(r.meta) }] : [];
-    });
-  } finally {
-    db.close();
-  }
-}
-
-export async function pageLinksIndex(url: string, limit = 100): Promise<PageLink[]> {
-  const pgs = await pg();
-  if (!pgs) return pageLinks(DEFAULT_DB, url, limit);
-  const row = await pgs.query("SELECT links FROM pages WHERE url = $1", [url]);
-  const targets = ((row[0]?.links as string[] | undefined) ?? []).slice(0, limit);
-  if (targets.length === 0) return [];
-  const params = targets.map((_, i) => `$${i + 1}`);
-  const rows = await pgs.query(
-    `SELECT url, title, meta FROM pages WHERE url IN (${params.join(", ")})`,
-    targets,
-  );
-  const byUrl = new Map(rows.map((r) => [String(r.url), r]));
-  return targets.flatMap((t) => {
-    const r = byUrl.get(t);
-    return r
-      ? [{ url: String(r.url), title: String(r.title ?? ""), meta: (r.meta ?? {}) as PageMeta }]
-      : [];
-  });
-}
-
 export function recentPages(dbPath: string, limit = 50): { url: string; title: string; status: number; meta: PageMeta; fetched_at: string }[] {
   if (!existsSync(dbPath)) return [];
   const db = new Database(dbPath, { readonly: true });

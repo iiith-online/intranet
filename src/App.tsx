@@ -16,7 +16,6 @@ type PageMeta = {
 type Result = { url: string; title: string; meta: PageMeta; fetched_at: string; snippet: string };
 type BrowseItem = { url: string; title: string; meta: PageMeta; versions?: BrowseItem[] };
 type BrowseGroup = { id: string; title: string; items: BrowseItem[] };
-type PageLink = { url: string; title: string; meta: PageMeta };
 type TimelineEntry = { url: string; title: string; meta: PageMeta; modified: string };
 type TimelinePeriod = { id: string; label: string; items: TimelineEntry[] };
 type SearchResponse = { query: string; indexed: boolean; results: Result[] };
@@ -98,7 +97,6 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [browse, setBrowse] = useState<BrowseGroup[] | null>(null);
   const [browseError, setBrowseError] = useState(false);
-  const [popup, setPopup] = useState<{ url: string; title: string; links: PageLink[] | null } | null>(null);
   const [periods, setPeriods] = useState<TimelinePeriod[] | null>(null);
   const [timelineError, setTimelineError] = useState(false);
   const [scanEnabled, setScanEnabled] = useState(false);
@@ -153,25 +151,6 @@ export function App() {
     }, 250);
     return () => clearTimeout(timer);
   }, [query]);
-
-  async function openPage(url: string, title: string) {
-    setPopup({ url, title, links: null });
-    try {
-      const d = (await (await fetch(`/api/links?url=${encodeURIComponent(url)}`)).json()) as { links: PageLink[] };
-      setPopup({ url, title, links: d.links });
-    } catch {
-      setPopup({ url, title, links: [] });
-    }
-  }
-
-  useEffect(() => {
-    if (!popup) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setPopup(null);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [popup]);
 
   async function startScan() {
     setScanState("running");
@@ -361,13 +340,15 @@ export function App() {
                 {g.id === "offices" ? (
                   <div className="grid gap-2 sm:grid-cols-2">
                     {g.items.map((it) => (
-                      <button
+                      <a
                         key={it.url}
-                        onClick={() => openPage(it.url, it.title)}
-                        className="rounded-md border bg-card px-4 py-3 text-left text-sm font-medium hover:bg-accent hover:text-accent-foreground"
+                        href={it.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="rounded-md border bg-card px-4 py-3 text-sm font-medium hover:bg-accent hover:text-accent-foreground"
                       >
                         {it.title}
-                      </button>
+                      </a>
                     ))}
                   </div>
                 ) : (
@@ -405,7 +386,7 @@ export function App() {
                               ))}
                             </ul>
                           </details>
-                        ) : it.meta?.kind === "file" ? (
+                        ) : (
                           <a
                             href={it.url}
                             target="_blank"
@@ -415,14 +396,6 @@ export function App() {
                             <span className="min-w-0 truncate text-sm">{it.title}</span>
                             <span className="shrink-0 text-xs text-muted-foreground">{metaLine(it.meta)}</span>
                           </a>
-                        ) : (
-                          <button
-                            onClick={() => openPage(it.url, it.title)}
-                            className="flex w-full items-baseline justify-between gap-4 px-4 py-2 text-left hover:bg-accent"
-                          >
-                            <span className="min-w-0 truncate text-sm">{it.title}</span>
-                            <span className="shrink-0 text-xs text-muted-foreground">links</span>
-                          </button>
                         )}
                       </li>
                     ))}
@@ -430,57 +403,6 @@ export function App() {
                 )}
               </section>
             ))}
-        </div>
-      )}
-
-      {popup && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
-          onClick={() => setPopup(null)}
-          role="dialog"
-          aria-label={popup.title}
-        >
-          <div
-            className="max-h-[80vh] w-full max-w-lg overflow-y-auto rounded-lg border bg-card p-5"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="mb-3 flex items-start justify-between gap-4">
-              <div className="min-w-0">
-                <h3 className="truncate text-base font-semibold">{popup.title}</h3>
-                <a
-                  href={popup.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="break-all text-xs text-muted-foreground hover:underline"
-                >
-                  {popup.url}
-                </a>
-              </div>
-              <button
-                onClick={() => setPopup(null)}
-                className="shrink-0 rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
-                aria-label="Close"
-              >
-                ✕
-              </button>
-            </div>
-            {popup.links === null ? (
-              <p className="py-6 text-center text-sm text-muted-foreground">Loading links…</p>
-            ) : popup.links.length === 0 ? (
-              <p className="py-6 text-center text-sm text-muted-foreground">No links found on this page.</p>
-            ) : (
-              <ul className="divide-y rounded border">
-                {popup.links.map((l) => (
-                  <li key={l.url}>
-                    <a href={l.url} target="_blank" rel="noreferrer" className="block px-3 py-2 hover:bg-accent">
-                      <span className="block truncate text-sm">{l.title || fileName(l.url)}</span>
-                      <span className="block truncate text-xs text-muted-foreground">{l.url}</span>
-                    </a>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
         </div>
       )}
     </div>
