@@ -10,7 +10,7 @@ import { Database } from "bun:sqlite";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { crawl, groupPages, groupTimeline, recentPages, search } from "./crawler";
+import { crawl, groupPages, groupTimeline, pageLinks, recentPages, search } from "./crawler";
 import type { PageMeta } from "./crawler";
 import { FIXTURES, serveFixtures } from "../../testdata/fixtures";
 
@@ -240,6 +240,13 @@ test("groupTimeline orders entries by month of last-modified, newest first", () 
   expect(all.some((i) => i.url.includes("dead"))).toBe(false); // 404 → excluded
 });
 
-test("search on missing db returns empty, not an error", () => {
-  expect(search(join(tmpdir(), "does-not-exist.db"), "anything")).toHaveLength(0);
+test("pageLinks resolves a page's stored links to indexed titles", async () => {
+  await crawl({ baseUrl: server!.url.href, dbPath, maxPages: 100, delayMs: 0 });
+  const links = pageLinks(dbPath, server!.url.href);
+
+  expect(links.some((l) => l.url.includes("/academic"))).toBe(true);
+  expect(links.some((l) => l.url.includes("/admissions"))).toBe(true);
+  expect(links.find((l) => l.url.includes("/academic"))?.title).toBe("Academic Affairs");
+  expect(links.find((l) => l.url.includes("example.com"))).toBeUndefined(); // external links not stored
+  expect(pageLinks(dbPath, `${server!.url.href}does-not-exist`)).toHaveLength(0);
 });
