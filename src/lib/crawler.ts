@@ -158,6 +158,19 @@ async function fetchPage(url: string, timeoutMs: number, cookie?: string): Promi
   }
 }
 
+const ENTITIES: Record<string, string> = {
+  amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", ensp: " ", emsp: " ",
+  mdash: "—", ndash: "–", hellip: "…", rsquo: "’", lsquo: "‘", rdquo: "”", ldquo: "“",
+};
+
+/** Decode HTML entities in extracted text (HTMLRewriter leaves them raw). */
+function decodeEntities(s: string): string {
+  return s
+    .replace(/&#x([0-9a-f]+);/gi, (_, h: string) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_, d: string) => String.fromCodePoint(parseInt(d, 10)))
+    .replace(/&([a-z]+);/gi, (m, n: string) => ENTITIES[n.toLowerCase()] ?? m);
+}
+
 /** Extract title/metadata/text/links via HTMLRewriter (Bun built-in).
  *  Content inside <script>/<style> is never delivered to text handlers on
  *  other elements, so no exclusions are needed. */
@@ -205,15 +218,15 @@ async function extractHtml(body: string, url: string): Promise<{ title: string; 
 
   const meta: PageMeta = {
     kind: "html",
-    description: tags.description || tags["og:description"],
-    keywords: tags.keywords,
-    ogTitle: tags["og:title"],
+    description: decodeEntities(tags.description || tags["og:description"] || ""),
+    keywords: decodeEntities(tags.keywords ?? ""),
+    ogTitle: decodeEntities(tags["og:title"] ?? ""),
     canonical: tags.canonical,
   };
   return {
-    title: title.trim().slice(0, 500),
+    title: decodeEntities(title).trim().slice(0, 500),
     meta,
-    text: chunks.join(" ").replace(/\s+/g, " ").trim().slice(0, 50_000),
+    text: decodeEntities(chunks.join(" ")).replace(/\s+/g, " ").trim().slice(0, 50_000),
     links: [...links],
   };
 }
