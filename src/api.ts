@@ -4,7 +4,7 @@
  * same behavior.
  */
 
-import { browseIndexPg, crawl, indexHasPagesIndex, recentPagesIndex, searchIndex } from "./lib/crawler";
+import { browseIndexPg, crawl, indexHasPagesIndex, recentPagesIndex, searchIndex, timelineIndexPg } from "./lib/crawler";
 import type { SearchResult } from "./lib/crawler";
 
 let scanRunning = false;
@@ -37,6 +37,10 @@ export async function handleApiRequest(req: Request): Promise<Response> {
 
   if (path === "/api/browse") {
     return Response.json({ groups: await browseIndexPg() });
+  }
+
+  if (path === "/api/timeline") {
+    return Response.json({ periods: await timelineIndexPg() });
   }
 
   // Device-side scan: the server crawls the intranet (works when it runs on

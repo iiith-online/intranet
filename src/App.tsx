@@ -15,15 +15,23 @@ type PageMeta = {
 
 type Result = { url: string; title: string; meta: PageMeta; fetched_at: string; snippet: string };
 type Page = { url: string; title: string; status: number; meta: PageMeta; fetched_at: string };
-type BrowseItem = { url: string; title: string; meta: PageMeta };
+type BrowseItem = { url: string; title: string; meta: PageMeta; versions?: BrowseItem[] };
 type BrowseGroup = { id: string; title: string; items: BrowseItem[] };
+type TimelineEntry = { url: string; title: string; meta: PageMeta; modified: string };
+type TimelinePeriod = { id: string; label: string; items: TimelineEntry[] };
 type SearchResponse = { query: string; indexed: boolean; results: Result[] };
 type PagesResponse = { pages: Page[] };
 type BrowseResponse = { groups: BrowseGroup[] };
+type TimelineResponse = { periods: TimelinePeriod[] };
 
 function formatDate(iso: string): string {
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+}
+
+function formatDateShort(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
 }
 
 function formatSize(bytes?: number): string {
@@ -84,7 +92,7 @@ function TabButton({
 }
 
 export function App() {
-  const [tab, setTab] = useState<"search" | "browse">("search");
+  const [tab, setTab] = useState<"search" | "browse" | "timeline">("search");
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<Result[] | null>(null);
   const [indexed, setIndexed] = useState<boolean | null>(null);
@@ -92,6 +100,8 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [browse, setBrowse] = useState<BrowseGroup[] | null>(null);
   const [browseError, setBrowseError] = useState(false);
+  const [periods, setPeriods] = useState<TimelinePeriod[] | null>(null);
+  const [timelineError, setTimelineError] = useState(false);
   const [scanEnabled, setScanEnabled] = useState(false);
   const [scanState, setScanState] = useState<"idle" | "running" | "done" | "error">("idle");
   const [scanMessage, setScanMessage] = useState("");
@@ -119,6 +129,15 @@ export function App() {
         .catch(() => setBrowseError(true));
     }
   }, [tab, browse, browseError]);
+
+  useEffect(() => {
+    if (tab === "timeline" && periods === null && !timelineError) {
+      fetch("/api/timeline")
+        .then((r) => r.json() as Promise<TimelineResponse>)
+        .then((d) => setPeriods(d.periods))
+        .catch(() => setTimelineError(true));
+    }
+  }, [tab, periods, timelineError]);
 
   useEffect(() => {
     const q = query.trim();
@@ -201,6 +220,9 @@ export function App() {
         </TabButton>
         <TabButton active={tab === "browse"} onClick={() => setTab("browse")}>
           Browse
+        </TabButton>
+        <TabButton active={tab === "timeline"} onClick={() => setTab("timeline")}>
+          Timeline
         </TabButton>
       </div>
 
@@ -375,6 +397,46 @@ export function App() {
                     ))}
                   </ul>
                 )}
+              </section>
+            ))}
+        </div>
+      )}
+      {tab === "timeline" && (
+        <div className="space-y-8">
+          {timelineError && (
+            <Card>
+              <CardContent className="py-8 text-center text-muted-foreground">
+                Could not load the timeline. Try again later.
+              </CardContent>
+            </Card>
+          )}
+          {periods === null && !timelineError && <p className="text-muted-foreground">Loading…</p>}
+          {periods !== null &&
+            periods.map((p) => (
+              <section key={p.id}>
+                <h2 className="mb-3 flex items-baseline gap-2 text-lg font-semibold">
+                  {p.label}
+                  <span className="text-sm font-normal text-muted-foreground">{p.items.length}</span>
+                </h2>
+                <ul className="divide-y rounded-lg border bg-card">
+                  {p.items.map((it) => (
+                    <li key={it.url}>
+                      <a
+                        href={it.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="flex items-baseline justify-between gap-4 px-4 py-2 hover:bg-accent"
+                      >
+                        <span className="min-w-0 truncate text-sm">{it.title}</span>
+                        <span className="shrink-0 text-xs text-muted-foreground">
+                          {metaLine(it.meta)}
+                          {metaLine(it.meta) && " · "}
+                          {formatDateShort(it.modified)}
+                        </span>
+                      </a>
+                    </li>
+                  ))}
+                </ul>
               </section>
             ))}
         </div>

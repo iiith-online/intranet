@@ -54,6 +54,12 @@ export type PageMeta = {
   contentLength?: number;
   lastModified?: string;
   redirectTo?: string;
+  // extended metadata: HTTP headers + HTML structure
+  server?: string;
+  xPoweredBy?: string;
+  cacheControl?: string;
+  expires?: string;
+  headings?: string[];
 };
 
 export type SearchResult = {
@@ -132,6 +138,10 @@ type Fetched = {
   contentType?: string;
   contentLength?: number;
   lastModified?: string;
+  server?: string;
+  xPoweredBy?: string;
+  cacheControl?: string;
+  expires?: string;
   body?: string;
   finalUrl?: string;
 };
@@ -146,13 +156,20 @@ async function fetchPage(url: string, timeoutMs: number, cookie?: string): Promi
     const contentType = res.headers.get("content-type") ?? "";
     const contentLength = Number(res.headers.get("content-length") ?? NaN);
     const lastModified = res.headers.get("last-modified") ?? undefined;
-    if (res.status !== 200) return { status: res.status, contentType, contentLength, lastModified, finalUrl: res.url };
+    const server = res.headers.get("server") ?? undefined;
+    const xPoweredBy = res.headers.get("x-powered-by") ?? undefined;
+    const cacheControl = res.headers.get("cache-control") ?? undefined;
+    const expires = res.headers.get("expires") ?? undefined;
+    // The session cookie is deliberately not stored.
+    if (res.status !== 200) {
+      return { status: res.status, contentType, contentLength, lastModified, server, xPoweredBy, cacheControl, expires, finalUrl: res.url };
+    }
     if (!contentType.includes("text/html")) {
       // Files are recorded with their metadata only; stop the download.
       res.body?.cancel();
-      return { status: 200, contentType, contentLength, lastModified, finalUrl: res.url };
+      return { status: 200, contentType, contentLength, lastModified, server, xPoweredBy, cacheControl, expires, finalUrl: res.url };
     }
-    return { status: 200, contentType, contentLength, lastModified, body: await res.text(), finalUrl: res.url };
+    return { status: 200, contentType, contentLength, lastModified, server, xPoweredBy, cacheControl, expires, body: await res.text(), finalUrl: res.url };
   } catch {
     return { status: -1 }; // network error / timeout
   }
@@ -180,6 +197,14 @@ async function extractHtml(body: string, url: string): Promise<{ title: string; 
   const tags: Record<string, string> = {};
   const links = new Set<string>();
   const chunks: string[] = [];
+  const headings: string[] = [];
+  let currentHeading = "";
+
+  const pushHeading = () => {
+    const h = currentHeading.trim();
+    if (h && headings.length < 8) headings.push(h.slice(0, 160));
+    currentHeading = "";
+  };
 
   const rewriter = new HTMLRewriter()
     .on("title", {
@@ -212,9 +237,20 @@ async function extractHtml(body: string, url: string): Promise<{ title: string; 
       text(t) {
         chunks.push(t.text);
       },
+    })
+    .on("h1, h2, h3", {
+      // Bun's HTMLRewriter never fires `end` handlers, so a heading ends when
+      // the next one starts (or at the end of the document).
+      element() {
+        pushHeading();
+      },
+      text(t) {
+        currentHeading += t.text;
+      },
     });
 
   await rewriter.transform(new Response(body));
+  pushHeading();
 
   const meta: PageMeta = {
     kind: "html",
@@ -222,6 +258,7 @@ async function extractHtml(body: string, url: string): Promise<{ title: string; 
     keywords: decodeEntities(tags.keywords ?? ""),
     ogTitle: decodeEntities(tags["og:title"] ?? ""),
     canonical: tags.canonical,
+    headings,
   };
   return {
     title: decodeEntities(title).trim().slice(0, 500),
@@ -328,12 +365,44 @@ export async function crawl(options: CrawlOptions = {}): Promise<{
 
     if (page.status === 200 && page.body) {
       const { title, meta, text, links } = await extractHtml(page.body, url);
-      record(url, 200, title, { ...meta, contentType: page.contentType, contentLength: page.contentLength, lastModified: page.lastModified }, text, links);
+      record(
+        url,
+        200,
+        title,
+        {
+          ...meta,
+          contentType: page.contentType,
+          contentLength: page.contentLength,
+          lastModified: page.lastModified,
+          server: page.server,
+          xPoweredBy: page.xPoweredBy,
+          cacheControl: page.cacheControl,
+          expires: page.expires,
+        },
+        text,
+        links,
+      );
       for (const link of links) if (!seen.has(link)) queue.push(link);
       fetched++;
     } else if (page.status === 200) {
       // File (PDF/XLS/…): metadata only, body was cancelled at fetch time.
-      record(url, 200, "", { kind: "file", contentType: page.contentType, contentLength: page.contentLength, lastModified: page.lastModified }, "", []);
+      record(
+        url,
+        200,
+        "",
+        {
+          kind: "file",
+          contentType: page.contentType,
+          contentLength: page.contentLength,
+          lastModified: page.lastModified,
+          server: page.server,
+          xPoweredBy: page.xPoweredBy,
+          cacheControl: page.cacheControl,
+          expires: page.expires,
+        },
+        "",
+        [],
+      );
       fetched++;
     } else if (page.status === -1) {
       failed++;
@@ -559,6 +628,70 @@ export async function browseIndexPg(): Promise<BrowseGroup[]> {
   if (!pgs) return browseIndex();
   const rows = await pgs.query("SELECT url, status, title, meta FROM pages");
   return groupPages(
+    rows.map((r) => ({
+      url: String(r.url),
+      status: Number(r.status),
+      title: String(r.title ?? ""),
+      meta: (r.meta ?? {}) as PageMeta,
+    })),
+  );
+}
+
+export type TimelineEntry = { url: string; title: string; meta: PageMeta; modified: string };
+export type TimelinePeriod = { id: string; label: string; items: TimelineEntry[] };
+
+function fileNameOf(url: string): string {
+  const last = url.split("?").at(0)?.split("/").pop() ?? url;
+  try {
+    return decodeURIComponent(last) || url;
+  } catch {
+    return last;
+  }
+}
+
+/** Chronological view: entries grouped by the month of their server-side
+ *  Last-Modified date, newest first. */
+export function groupTimeline(rows: { url: string; status: number; title: string; meta: PageMeta }[]): TimelinePeriod[] {
+  const byMonth = new Map<string, TimelineEntry[]>();
+  for (const row of rows) {
+    if (row.status !== 200) continue;
+    const lm = row.meta?.lastModified;
+    if (!lm) continue;
+    const d = new Date(lm);
+    if (Number.isNaN(d.getTime())) continue;
+    const key = d.toISOString().slice(0, 7);
+    const entry = { url: row.url, title: row.title || fileNameOf(row.url), meta: row.meta, modified: d.toISOString() };
+    const list = byMonth.get(key);
+    if (list) list.push(entry);
+    else byMonth.set(key, [entry]);
+  }
+  return [...byMonth.entries()]
+    .sort((a, b) => b[0].localeCompare(a[0]))
+    .map(([id, items]) => ({
+      id,
+      label: new Date(`${id}-01T00:00:00Z`).toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "UTC" }),
+      items: items.sort((a, b) => b.modified.localeCompare(a.modified) || a.title.localeCompare(b.title)),
+    }));
+}
+
+export function timelineIndex(dbPath: string = DEFAULT_DB): TimelinePeriod[] {
+  if (!existsSync(dbPath)) return [];
+  const db = new Database(dbPath, { readonly: true });
+  try {
+    const rows = db
+      .query("SELECT url, status, title, meta FROM pages")
+      .all() as { url: string; status: number; title: string; meta: string }[];
+    return groupTimeline(rows.map((r) => ({ url: r.url, status: r.status, title: r.title, meta: parseMeta(r.meta) })));
+  } finally {
+    db.close();
+  }
+}
+
+export async function timelineIndexPg(): Promise<TimelinePeriod[]> {
+  const pgs = await pg();
+  if (!pgs) return timelineIndex();
+  const rows = await pgs.query("SELECT url, status, title, meta FROM pages");
+  return groupTimeline(
     rows.map((r) => ({
       url: String(r.url),
       status: Number(r.status),

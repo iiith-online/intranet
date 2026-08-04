@@ -10,7 +10,7 @@ import { Database } from "bun:sqlite";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { crawl, groupPages, recentPages, search } from "./crawler";
+import { crawl, groupPages, groupTimeline, recentPages, search } from "./crawler";
 import type { PageMeta } from "./crawler";
 import { FIXTURES, serveFixtures } from "../../testdata/fixtures";
 
@@ -78,6 +78,7 @@ test("crawl indexes reachable pages, respects robots, records errors and redirec
     expect(homeMeta.kind).toBe("html");
     expect(homeMeta.keywords).toBe("campus, portal");
     expect(homeMeta.contentType).toContain("text/html");
+    expect(homeMeta.headings).toContain("Welcome"); // h1 extracted
 
     // Files: metadata only, no body content, size/type/last-modified recorded.
     const fileUrl = `${server!.url.href}files/guide.pdf`;
@@ -210,4 +211,31 @@ test("groupPages collapses batch-coded and date-stamped documents", () => {
   expect(almanac?.title).toBe("Almanac");
   const nonUg1 = timetables.items.find((i) => i.title.includes("Non-UG1"));
   expect(nonUg1?.versions).toBeUndefined(); // a genuinely different document
+});
+
+test("groupTimeline orders entries by month of last-modified, newest first", () => {
+  const mk = (url: string, lm: string | undefined, status = 200) => ({
+    url,
+    status,
+    title: "",
+    meta: { kind: "file", lastModified: lm } as PageMeta,
+  });
+  const rows = [
+    mk("https://x/files/b.pdf", "2026-08-03T07:45:21Z"),
+    mk("https://x/files/a.pdf", "2026-08-01T10:00:00Z"),
+    mk("https://x/files/c.pdf", "2026-07-15T00:00:00Z"),
+    mk("https://x/files/no-date.pdf", undefined),
+    mk("https://x/files/bad.pdf", "not-a-date"),
+    mk("https://x/files/dead.pdf", "2026-08-02T00:00:00Z", 404),
+  ];
+  const periods = groupTimeline(rows);
+
+  expect(periods.map((p) => p.id)).toEqual(["2026-08", "2026-07"]);
+  expect(periods[0]!.label).toBe("August 2026");
+  expect(periods[0]!.items.map((i) => i.title)).toEqual(["b.pdf", "a.pdf"]); // date desc within month
+  expect(periods[1]!.items).toHaveLength(1);
+  const all = periods.flatMap((p) => p.items);
+  expect(all.some((i) => i.url.includes("no-date"))).toBe(false); // no timestamp → excluded
+  expect(all.some((i) => i.url.includes("bad"))).toBe(false); // unparseable → excluded
+  expect(all.some((i) => i.url.includes("dead"))).toBe(false); // 404 → excluded
 });
