@@ -10,8 +10,9 @@ import { Database } from "bun:sqlite";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildFtsQuery, buildPgQuery, crawl, groupPages, groupTimeline, pageLinks, recentPages, search } from "./crawler";
+import { buildFtsQuery, buildPgQuery, crawl, groupPages, groupTimeline, pageLinks, pgSearch, recentPages, search } from "./crawler";
 import type { PageMeta } from "./crawler";
+import { renderSnippet } from "../App";
 import { FIXTURES, serveFixtures } from "../../testdata/fixtures";
 
 let server: Server<undefined> | null = null;
@@ -124,6 +125,45 @@ test("FTS search ranks, snippets, stems, and finds files by URL", async () => {
 test("garbage query falls back to LIKE without throwing", async () => {
   const hits = search(dbPath, '"-- OR 1=1');
   expect(Array.isArray(hits)).toBe(true);
+});
+
+test("FTS snippet wraps the matched term in sentinel markers", () => {
+  const hits = search(dbPath, "registration");
+  expect(hits[0]!.url).toContain("/academic");
+  expect(hits[0]!.snippet).toContain("\u0001registration\u0002");
+});
+
+test("pgSearch converts ts_headline <b> tags to sentinel markers", async () => {
+  const fakeDb = {
+    query: async () => [
+      {
+        url: "https://x/files/a.pdf",
+        title: "A",
+        meta: {},
+        fetched_at: "2026-08-01T00:00:00Z",
+        snip: "<b>term</b> in text",
+      },
+    ],
+    end: async () => {},
+  };
+  const results = await pgSearch(fakeDb, "term");
+  expect(results[0]!.snippet).toBe("\u0001term\u0002 in text");
+});
+
+test("renderSnippet escapes HTML before injecting <mark> (XSS-safe)", () => {
+  const out = renderSnippet("<script>\u0001x\u0002</script>");
+  expect(out).toContain("&lt;script&gt;");
+  expect(out).not.toContain("<script>");
+  expect(out).toContain(
+    '<mark class="bg-yellow-200/60 text-inherit rounded px-0.5">x</mark>',
+  );
+});
+
+test("renderSnippet converts sentinel markers to <mark> and escapes bare text", () => {
+  expect(renderSnippet("a \u0001fee\u0002 b")).toBe(
+    'a <mark class="bg-yellow-200/60 text-inherit rounded px-0.5">fee</mark> b',
+  );
+  expect(renderSnippet("a <b> b")).toBe("a &lt;b&gt; b");
 });
 
 test("buildFtsQuery builds per-term AND of prefixed terms", () => {

@@ -493,7 +493,7 @@ export function search(dbPath: string, query: string, limit = 20): SearchResult[
     const rows = db
       .query(
         `SELECT p.url, p.title, p.meta, p.fetched_at, bm25(pages_fts) AS score,
-                snippet(pages_fts, 2, '…', '…', '…', 12) AS snip
+                snippet(pages_fts, 2, '\u0001', '\u0002', '…', 12) AS snip
          FROM pages_fts JOIN pages p ON p.url = pages_fts.url
          WHERE pages_fts MATCH ? ORDER BY score LIMIT ?`,
       )
@@ -871,7 +871,7 @@ async function ensurePgSchema(db: Db): Promise<void> {
   }
 }
 
-async function pgSearch(db: Db, query: string, limit = 20): Promise<SearchResult[]> {
+export async function pgSearch(db: Db, query: string, limit = 20): Promise<SearchResult[]> {
   try {
     const built = buildPgQuery(query);
     if (built === null) throw new Error("not tsquery-expressible → ILIKE fallback"); // unbalanced quotes / no terms
@@ -892,7 +892,7 @@ async function pgSearch(db: Db, query: string, limit = 20): Promise<SearchResult
       title: String(r.title ?? ""),
       meta: (r.meta ?? {}) as PageMeta,
       fetched_at: new Date(r.fetched_at as string).toISOString(),
-      snippet: String(r.snip ?? "").replace(/<[^>]+>/g, ""), // ts_headline adds <b> markup
+      snippet: String(r.snip ?? "").replace(/<b>/g, "\u0001").replace(/<\/b>/g, "\u0002"), // ts_headline adds <b> markup
     }));
   } catch {
     // Garbage query → ILIKE fallback.

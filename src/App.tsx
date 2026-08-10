@@ -29,6 +29,20 @@ function formatDate(iso: string): string {
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
 }
 
+// Escape first, then mark: index text is entity-decoded page content, so
+// raw HTML from the index must never reach the DOM.
+export function renderSnippet(text: string): string {
+  const escaped = text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+  return escaped
+    .replace(/\u0001/g, '<mark class="bg-yellow-200/60 text-inherit rounded px-0.5">')
+    .replace(/\u0002/g, "</mark>");
+}
+
 function formatDateShort(iso: string): string {
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
@@ -127,13 +141,13 @@ export function App() {
   }, [tab, browse, browseError]);
 
   useEffect(() => {
-    if (periods === null && !timelineError) {
+    if (tab === "search" && periods === null && !timelineError) {
       fetch("/api/timeline")
         .then((r) => r.json() as Promise<TimelineResponse>)
         .then((d) => setPeriods(d.periods))
         .catch(() => setTimelineError(true));
     }
-  }, [periods, timelineError]);
+  }, [tab, periods, timelineError]);
 
   useEffect(() => {
     const q = query.trim();
@@ -349,7 +363,15 @@ export function App() {
                     </CardHeader>
                     <CardContent className="px-4 py-0">
                       <p className="text-sm text-muted-foreground">
-                        {r.meta?.kind === "html" ? r.snippet || metaLine(r.meta) : metaLine(r.meta)}
+                        {r.meta?.kind === "html" ? (
+                          r.snippet ? (
+                            <span dangerouslySetInnerHTML={{ __html: renderSnippet(r.snippet) }} />
+                          ) : (
+                            metaLine(r.meta)
+                          )
+                        ) : (
+                          metaLine(r.meta)
+                        )}
                       </p>
                       <p className="mt-2 text-xs text-muted-foreground">Indexed {formatDate(r.fetched_at)}</p>
                     </CardContent>
