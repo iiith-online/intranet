@@ -79,21 +79,37 @@ export const FIXTURES: Record<string, { status: number; type: string; body: stri
   "/robots.txt": { status: 200, type: "text/plain", body: "User-agent: *\nDisallow: /private\n" },
 };
 
-export function serveFixtures(options: { port?: number } = {}): Server<undefined> {
-  return Bun.serve({
+/** Fixture server with a switchable variant. One instance keeps the same
+ *  port/origin across variant flips — a second server on the same port is
+ *  racy on Windows (stop/rebind can silently land on a new port). */
+export type FixtureServer = Server<undefined> & {
+  setVariant(v: "removed-academic" | null): void;
+};
+
+export function serveFixtures(options: { port?: number; variant?: "removed-academic" } = {}): FixtureServer {
+  const state: { variant: "removed-academic" | null } = { variant: options.variant ?? null };
+  const server = Bun.serve({
     port: options.port ?? 0,
     fetch(req) {
       const path = new URL(req.url).pathname;
+      if (state.variant === "removed-academic") {
+        if (path === "/academic") return new Response("gone", { status: 404 });
+        // Hanging route: the promise never settles; only the crawler's
+        // AbortSignal.timeout ends this request.
+        if (path === "/admissions") return new Promise<Response>(() => {});
+      }
       const f = FIXTURES[path];
       if (!f) return new Response("not found", { status: 404 });
       if (f.status === 302) {
-        return new Response("", { status: 302, headers: { location: "/academic" } });
+        const location = state.variant === "removed-academic" ? "/admissions" : "/academic";
+        return new Response("", { status: 302, headers: { location } });
       }
+      const body = state.variant === "removed-academic" && path === "/" ? FIXTURES["/"]!.body.replace('<a href="/academic">Academic</a>', "") : f.body;
       // Huge route: real content-length exceeds the PDF cap; the crawler must
       // reject it on the fast path without reading the 6 MB body.
-      const bodyBytes = new TextEncoder().encode(f.body);
+      const bodyBytes = new TextEncoder().encode(body);
       const contentLength = path === "/files/huge.pdf" ? 6 * 1024 * 1024 : bodyBytes.length;
-      return new Response(f.body, {
+      return new Response(body, {
         status: f.status,
         headers: {
           "content-type": f.type,
@@ -101,6 +117,11 @@ export function serveFixtures(options: { port?: number } = {}): Server<undefined
           "last-modified": "Mon, 04 Aug 2025 00:00:00 GMT",
         },
       });
+    },
+  });
+  return Object.assign(server, {
+    setVariant(v: "removed-academic" | null) {
+      state.variant = v;
     },
   });
 }

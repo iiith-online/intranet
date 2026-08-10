@@ -10,12 +10,13 @@ import { Database } from "bun:sqlite";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildFtsQuery, buildPgQuery, crawl, groupPages, groupTimeline, pageLinks, pgSearch, recentPages, search } from "./crawler";
+import { buildFtsQuery, buildPgQuery, crawl, groupPages, groupTimeline, pageLinks, pgSearch, recentPages, search, sweepStale, sweepStalePg } from "./crawler";
 import type { PageMeta } from "./crawler";
 import { renderSnippet } from "../App";
 import { FIXTURES, serveFixtures } from "../../testdata/fixtures";
+import type { FixtureServer } from "../../testdata/fixtures";
 
-let server: Server<undefined> | null = null;
+let server: FixtureServer | null = null;
 let dbPath = "";
 
 beforeAll(() => {
@@ -385,4 +386,120 @@ test("pageLinks resolves a page's stored links to indexed titles", async () => {
   expect(links.find((l) => l.url.includes("/academic"))?.title).toBe("Academic Affairs");
   expect(links.find((l) => l.url.includes("example.com"))).toBeUndefined(); // external links not stored
   expect(pageLinks(dbPath, `${server!.url.href}does-not-exist`)).toHaveLength(0);
+});
+
+test("stale sweep 410s pages unreached in crawl 2; -1 keeps the last good 200 row", async () => {
+  // Self-contained: crawl 1 with the full fixtures, then crawl 2 with the
+  // SAME server (same port → same row keys) flipped to the variant:
+  // /academic route removed AND unlinked from "/", /old redirects to
+  // /admissions, /admissions hangs forever.
+  const base = server!.url.href;
+  const tmp = join(tmpdir(), `iiit-variant-${process.pid}.db`);
+  try {
+    await crawl({ baseUrl: base, dbPath: tmp, maxPages: 100, delayMs: 0 });
+
+    const before = (() => {
+      const db = new Database(tmp, { readonly: true });
+      try {
+        return db.query("SELECT status, text, meta FROM pages WHERE url = ?").get(`${base}admissions`) as
+          | { status: number; text: string; meta: string }
+          | null;
+      } finally {
+        db.close();
+      }
+    })();
+    expect(before?.status).toBe(200);
+
+    server!.setVariant("removed-academic");
+    try {
+      await crawl({ baseUrl: base, dbPath: tmp, maxPages: 100, delayMs: 0, timeoutMs: 500 });
+
+      const db = new Database(tmp, { readonly: true });
+      try {
+        const rows = db.query("SELECT url, status, text, meta FROM pages").all() as {
+          url: string;
+          status: number;
+          text: string;
+          meta: string;
+        }[];
+        const byUrl = Object.fromEntries(rows.map((r) => [r.url, r]));
+        expect(byUrl[`${base}academic`]?.status).toBe(410);
+        expect(byUrl[`${base}admissions`]?.status).toBe(200);
+        expect(byUrl[`${base}admissions`]?.text).toBe(before!.text);
+        expect(byUrl[`${base}admissions`]?.meta).toBe(before!.meta);
+      } finally {
+        db.close();
+      }
+
+      const hits = search(tmp, "academic");
+      expect(hits.some((h) => h.url.includes("/academic"))).toBe(false);
+    } finally {
+      server!.setVariant(null);
+    }
+  } finally {
+    // Windows: Bun defers the file release after close(); cleanup is
+    // best-effort (worst case a temp file leaks).
+    await Bun.sleep(500);
+    for (const f of [tmp, `${tmp}-wal`, `${tmp}-shm`]) {
+      try {
+        rmSync(f, { force: true, maxRetries: 5, retryDelay: 100 });
+      } catch {
+        // ignore EBUSY; tmpdir is cleaned by the OS eventually
+      }
+    }
+  }
+});
+
+test("sweepStale marks unseen rows 410 in one ANDed-NOT-IN statement", () => {
+  const tmp = join(tmpdir(), `iiit-sweep-${process.pid}-${Math.random().toString(36).slice(2)}.db`);
+  const db = new Database(tmp);
+  try {
+    db.exec("CREATE TABLE pages (url TEXT PRIMARY KEY, status INTEGER NOT NULL)");
+    // Single bulk INSERT: 1200 per-row run() calls take ~9s under bun:test
+    // on Windows (Bun bug), a batch statement is instant.
+    const values = Array.from({ length: 1200 }, (_, i) => `('https://x/p${i}', 200)`).join(", ");
+    db.exec(`INSERT INTO pages (url, status) VALUES ${values}`);
+
+    // 600 seen urls → two 500-param NOT IN clauses ANDed into ONE statement;
+    // the corrupt per-chunk form would wrongly 410 the first 500 rows here.
+    const seen = Array.from({ length: 600 }, (_, i) => `https://x/p${i}`);
+    sweepStale(db, seen);
+
+    const rows = db.query("SELECT url, status FROM pages").all() as { url: string; status: number }[];
+    const byUrl = Object.fromEntries(rows.map((r) => [r.url, r.status]));
+    for (let i = 0; i < 1200; i++) {
+      expect(byUrl[`https://x/p${i}`]).toBe(i < 600 ? 200 : 410);
+    }
+  } finally {
+    db.close();
+    // Windows: Bun defers the file release after close(); cleanup is
+    // best-effort (worst case a temp file leaks).
+    try {
+      rmSync(tmp, { force: true, maxRetries: 5, retryDelay: 100 });
+    } catch {
+      // ignore EBUSY; tmpdir is cleaned by the OS eventually
+    }
+  }
+});
+
+test("sweepStalePg builds one statement with ANDed NOT IN clauses", async () => {
+  const calls: string[] = [];
+  const fakeDb = {
+    query: async (text: string) => {
+      calls.push(text);
+      return [];
+    },
+    end: async () => {},
+  };
+  const seen = Array.from({ length: 1200 }, (_, i) => `https://x/p${i}`);
+  await sweepStalePg(fakeDb, seen);
+
+  expect(calls).toHaveLength(1); // never one UPDATE per chunk
+  const sql = calls[0]!;
+  expect(sql.match(/NOT IN \(/g)).toHaveLength(3); // 1200 / 500 → 3 ANDed clauses
+  expect(sql).toMatch(/NOT IN \([^)]*\) AND url NOT IN \(/); // ANDed, not ORed
+  expect(sql).toContain("$500");
+  expect(sql).toContain("$501"); // placeholders sequential across clauses
+  expect(sql).toContain("$1200");
+  expect(sql).toContain("UPDATE pages SET status = 410");
 });

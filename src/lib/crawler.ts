@@ -425,6 +425,11 @@ export async function crawl(options: CrawlOptions = {}): Promise<{
       continue;
     }
 
+    // Pre-fetch row lookup: a -1 (network/timeout) keeps a last-good 200 row
+    // untouched below; T6 reuses the same lookup for If-Modified-Since.
+    const existing = db.query("SELECT status, meta FROM pages WHERE url = ?").get(url) as
+      | { status: number; meta: string }
+      | undefined;
     const page = await fetchPage(url, timeoutMs, cookie);
     // fetch() already followed any redirect chain; record a 302 stub for the
     // original URL and index the final URL instead (same-origin only).
@@ -496,6 +501,11 @@ export async function crawl(options: CrawlOptions = {}): Promise<{
       fetched++;
     } else if (page.status === -1) {
       failed++;
+      // A -1 (network error/timeout) must not clobber a live row: keep the
+      // last 200 untouched, record an error row only when none exists.
+      if (!existing || existing.status !== 200) {
+        record(url, -1, "", { kind: "error" }, "", []);
+      }
     } else {
       record(url, page.status, "", { kind: "error", contentType: page.contentType }, "", []);
       fetched++;
@@ -506,16 +516,46 @@ export async function crawl(options: CrawlOptions = {}): Promise<{
   }
 
   await flushPg();
+  // Stale sweep: pages not reached in THIS crawl become 410 (never deleted).
+  // Runs before the FTS rebuild so 410 rows are not re-indexed.
+  sweepStale(db, [...seen]);
   if (pgs) {
+    await sweepStalePg(pgs, [...seen]);
     await pgs.query(
       "INSERT INTO scans (source, base_url, pages, failed) VALUES ($1, $2, $3, $4)",
       [options.scanSource ?? "cli", baseUrl, fetched, failed],
     );
   }
   db.run("DELETE FROM pages_fts");
-  db.run("INSERT INTO pages_fts (url, title, text) SELECT url, title, text FROM pages");
+  db.run("INSERT INTO pages_fts (url, title, text) SELECT url, title, text FROM pages WHERE status = 200");
   db.close();
   return { baseUrl, dbPath, fetched, skipped, failed };
+}
+
+/** `url NOT IN (…) AND url NOT IN (…)` — one statement, ≤500 params per
+ *  clause. NEVER split the sweep into per-chunk UPDATEs: a later chunk's
+ *  `NOT IN (chunk_i)` would 410 every row not in that chunk. */
+function notInWhere(urls: string[], ph: (i: number) => string): string {
+  const clauses: string[] = [];
+  for (let i = 0; i < urls.length; i += 500) {
+    clauses.push(`url NOT IN (${urls.slice(i, i + 500).map((_, j) => ph(i + j)).join(", ")})`);
+  }
+  return clauses.join(" AND ");
+}
+
+/** Mark every page NOT reached in this crawl as 410. 410 keeps the row
+ *  (history, reversible); search/browse already filter status=200.
+ *  Concurrency caveat: an interleaved crawl can transiently 410 rows another
+ *  crawl just reached; a crashed crawl leaves 410s until the next successful
+ *  scan — accepted, 410 preserves history. */
+export function sweepStale(db: Database, seenUrls: string[]): void {
+  if (seenUrls.length === 0) return; // an empty crawl must not wipe the index
+  db.run(`UPDATE pages SET status = 410 WHERE ${notInWhere(seenUrls, () => "?")}`, seenUrls);
+}
+
+export async function sweepStalePg(db: Db, seenUrls: string[]): Promise<void> {
+  if (seenUrls.length === 0) return;
+  await db.query(`UPDATE pages SET status = 410 WHERE ${notInWhere(seenUrls, (i) => `$${i + 1}`)}`, seenUrls);
 }
 
 function parseMeta(raw: string | null | undefined): PageMeta {
@@ -585,7 +625,7 @@ export function search(dbPath: string, query: string, limit = 20): SearchResult[
         `SELECT p.url, p.title, p.meta, p.fetched_at, bm25(pages_fts) AS score,
                 snippet(pages_fts, 2, '\u0001', '\u0002', '…', 12) AS snip
          FROM pages_fts JOIN pages p ON p.url = pages_fts.url
-         WHERE pages_fts MATCH ? ORDER BY score LIMIT ?`,
+         WHERE pages_fts MATCH ? AND p.status = 200 ORDER BY score LIMIT ?`,
       )
       .all(built, limit) as { url: string; title: string; meta: string; fetched_at: string; snip: string | null }[];
     return rows.map((r) => ({
@@ -599,7 +639,7 @@ export function search(dbPath: string, query: string, limit = 20): SearchResult[
     const q = `%${query}%`;
     const rows = db
       .query(
-        `SELECT url, title, meta, fetched_at, text FROM pages WHERE title LIKE ? OR text LIKE ? OR url LIKE ? ORDER BY fetched_at DESC LIMIT ?`,
+        `SELECT url, title, meta, fetched_at, text FROM pages WHERE (title LIKE ? OR text LIKE ? OR url LIKE ?) AND status = 200 ORDER BY fetched_at DESC LIMIT ?`,
       )
       .all(q, q, q, limit) as { url: string; title: string; meta: string; fetched_at: string; text: string }[];
     return rows.map((r) => ({
@@ -972,7 +1012,7 @@ export async function pgSearch(db: Db, query: string, limit = 20): Promise<Searc
               ts_headline('english', title || ' ' || text, ${tsquery},
                           'MaxWords=24, MinWords=8') AS snip
        FROM pages
-       WHERE to_tsvector('english', title || ' ' || text || ' ' || url) @@ ${tsquery}
+       WHERE to_tsvector('english', title || ' ' || text || ' ' || url) @@ ${tsquery} AND status = 200
        ORDER BY ts_rank(to_tsvector('english', title || ' ' || text || ' ' || url), ${tsquery}) DESC
        LIMIT $2`,
       [built, limit],
@@ -989,7 +1029,7 @@ export async function pgSearch(db: Db, query: string, limit = 20): Promise<Searc
     const like = `%${query}%`;
     const rows = await db.query(
       `SELECT url, title, meta, fetched_at, text FROM pages
-       WHERE title ILIKE $1 OR text ILIKE $1 OR url ILIKE $1
+       WHERE (title ILIKE $1 OR text ILIKE $1 OR url ILIKE $1) AND status = 200
        ORDER BY fetched_at DESC LIMIT $2`,
       [like, limit],
     );
