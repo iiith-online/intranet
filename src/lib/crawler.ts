@@ -2,8 +2,9 @@
  * Crawler + search index for intranet.iiit.ac.in (or any base URL).
  *
  * - BFS crawl, same-origin only, robots.txt exact-prefix disallow, rate limited.
- * - Pages stored in SQLite (bun:sqlite, no deps) with an FTS5 index; file
- *   bodies (PDF/XLS/…) are never downloaded, only their metadata is recorded.
+ * - Pages stored in SQLite (bun:sqlite, no deps) with an FTS5 index; PDF
+ *   bodies ≤ 5 MB (INTRANET_PDF_MAX_MB) are downloaded and text-indexed,
+ *   other file types (XLS/…) are recorded with metadata only.
  * - With `--push` (or DATABASE_URL set) every page is also upserted into
  *   Postgres (Neon), and the server reads from Postgres when DATABASE_URL is
  *   set — so device-side scans can contribute to a shared index.
@@ -16,6 +17,7 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import postgres from "postgres";
 import { neon } from "@neondatabase/serverless";
+import { extractText, getDocumentProxy } from "unpdf";
 
 export const DEFAULT_DB = process.env.INTRANET_DB ?? join("index", "intranet.db");
 const DEFAULT_BASE = "https://intranet.iiit.ac.in";
@@ -60,6 +62,8 @@ export type PageMeta = {
   cacheControl?: string;
   expires?: string;
   headings?: string[];
+  /** Set when a PDF body was downloaded and text-extracted. */
+  textExtracted?: boolean;
 };
 
 export type SearchResult = {
@@ -142,9 +146,67 @@ type Fetched = {
   xPoweredBy?: string;
   cacheControl?: string;
   expires?: string;
-  body?: string;
+  body?: string | Uint8Array;
   finalUrl?: string;
 };
+
+/** PDF body cap in bytes; `INTRANET_PDF_MAX_MB` (default 5). Empty/invalid
+ *  env values must not become a 0-byte cap. */
+function pdfMaxBytes(): number {
+  const n = Number(process.env.INTRANET_PDF_MAX_MB ?? 5);
+  return (Number.isFinite(n) && n > 0 ? n : 5) * 1024 * 1024;
+}
+
+/** Read a body stream into a byte buffer, cancelling the reader (and returning
+ *  undefined) once more than maxBytes have been read. */
+async function readBodyCapped(res: Response, maxBytes: number): Promise<Uint8Array | undefined> {
+  const reader = res.body!.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel();
+      return undefined;
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    out.set(c, off);
+    off += c.byteLength;
+  }
+  return out;
+}
+
+/** True when a byte buffer starts with the %PDF- magic. */
+function sniffsPdf(bytes: Uint8Array): boolean {
+  return bytes.length >= 5 && new TextDecoder().decode(bytes.subarray(0, 5)) === "%PDF-";
+}
+
+/** True when the fetched body is a PDF: declared content-type, or a %PDF-
+ *  content sniff (servers that mislabel PDFs). */
+function isPdf(page: Fetched): page is Fetched & { body: Uint8Array } {
+  if (!(page.body instanceof Uint8Array)) return false;
+  return (page.contentType?.includes("pdf") ?? false) || sniffsPdf(page.body);
+}
+
+/** Extract text from a PDF buffer via unpdf. Returns null on any error —
+ *  the caller falls back to metadata-only (no crash, no retry).
+ *  ponytail: unpdf parses on the event loop — during a server scan the
+ *  server blocks per PDF; keep the cap small; do NOT add worker threads. */
+async function extractPdfText(bytes: Uint8Array): Promise<string | null> {
+  try {
+    const pdf = await getDocumentProxy(new Uint8Array(bytes));
+    const { text } = await extractText(pdf, { mergePages: true });
+    return text.trim().slice(0, 50_000);
+  } catch {
+    return null;
+  }
+}
 
 async function fetchPage(url: string, timeoutMs: number, cookie?: string): Promise<Fetched> {
   try {
@@ -165,9 +227,20 @@ async function fetchPage(url: string, timeoutMs: number, cookie?: string): Promi
       return { status: res.status, contentType, contentLength, lastModified, server, xPoweredBy, cacheControl, expires, finalUrl: res.url };
     }
     if (!contentType.includes("text/html")) {
-      // Files are recorded with their metadata only; stop the download.
-      res.body?.cancel();
-      return { status: 200, contentType, contentLength, lastModified, server, xPoweredBy, cacheControl, expires, finalUrl: res.url };
+      // PDFs (declared type or %PDF- sniff) are read up to the cap and
+      // text-indexed; everything else is recorded with metadata only.
+      const cap = pdfMaxBytes();
+      if (Number.isFinite(contentLength) && contentLength > cap) {
+        // Content-length fast path: never touch a body we would only discard.
+        res.body?.cancel();
+        return { status: 200, contentType, contentLength, lastModified, server, xPoweredBy, cacheControl, expires, finalUrl: res.url };
+      }
+      const bytes = await readBodyCapped(res, cap);
+      // ponytail: sub-cap non-PDF files are read fully before being discarded
+      // (the %PDF- sniff needs the first bytes); the cap bounds the waste —
+      // revisit with a peek-only read if it ever matters.
+      const body = bytes !== undefined && (contentType.includes("pdf") || sniffsPdf(bytes)) ? bytes : undefined;
+      return { status: 200, contentType, contentLength, lastModified, server, xPoweredBy, cacheControl, expires, body, finalUrl: res.url };
     }
     return { status: 200, contentType, contentLength, lastModified, server, xPoweredBy, cacheControl, expires, body: await res.text(), finalUrl: res.url };
   } catch {
@@ -363,7 +436,24 @@ export async function crawl(options: CrawlOptions = {}): Promise<{
       seen.add(url);
     }
 
-    if (page.status === 200 && page.body) {
+    if (page.status === 200 && isPdf(page)) {
+      // PDF body was downloaded within the cap: extract and index its text.
+      // Extraction failures (broken/oversized PDFs) fall back to metadata-only.
+      const text = await extractPdfText(page.body);
+      const meta: PageMeta = {
+        kind: "file",
+        contentType: page.contentType,
+        contentLength: page.contentLength,
+        lastModified: page.lastModified,
+        server: page.server,
+        xPoweredBy: page.xPoweredBy,
+        cacheControl: page.cacheControl,
+        expires: page.expires,
+        ...(text === null ? {} : { textExtracted: true }),
+      };
+      record(url, 200, "", meta, text ?? "", []);
+      fetched++;
+    } else if (page.status === 200 && typeof page.body === "string") {
       const { title, meta, text, links } = await extractHtml(page.body, url);
       record(
         url,
@@ -385,7 +475,7 @@ export async function crawl(options: CrawlOptions = {}): Promise<{
       for (const link of links) if (!seen.has(link)) queue.push(link);
       fetched++;
     } else if (page.status === 200) {
-      // File (PDF/XLS/…): metadata only, body was cancelled at fetch time.
+      // Non-PDF file (XLS/…): metadata only, body was cancelled at fetch time.
       record(
         url,
         200,

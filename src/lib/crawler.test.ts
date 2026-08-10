@@ -40,10 +40,11 @@ afterAll(async () => {
 test("crawl indexes reachable pages, respects robots, records errors and redirects", async () => {
   const result = await crawl({ baseUrl: server!.url.href, dbPath, maxPages: 100, delayMs: 0 });
 
-  // Content pages: /, /academic, /admissions, /restricted(403) + the guide.pdf
-  // file record. /old redirects to /academic (already seen) so only a 302 stub
-  // is recorded for it. /private robots-blocked, external link dropped.
-  expect(result.fetched).toBe(5);
+  // Content pages: /, /academic, /admissions, /restricted(403) + guide.pdf,
+  // broken.pdf and huge.pdf file records. /old redirects to /academic (already
+  // seen) so only a 302 stub is recorded for it. /private robots-blocked,
+  // external link dropped.
+  expect(result.fetched).toBe(7);
   expect(result.skipped).toBe(1); // /private
   expect(result.failed).toBe(0);
 
@@ -81,7 +82,8 @@ test("crawl indexes reachable pages, respects robots, records errors and redirec
     expect(homeMeta.contentType).toContain("text/html");
     expect(homeMeta.headings).toContain("Welcome"); // h1 extracted
 
-    // Files: metadata only, no body content, size/type/last-modified recorded.
+    // Files: PDF bodies are downloaded (≤ cap) and text-extracted; size/type
+    // and last-modified are recorded alongside.
     const fileUrl = `${server!.url.href}files/guide.pdf`;
     const file = byUrl[fileUrl]!;
     const fileMeta = metaOf(fileUrl);
@@ -89,7 +91,8 @@ test("crawl indexes reachable pages, respects robots, records errors and redirec
     expect(fileMeta.contentType).toBe("application/pdf");
     expect(fileMeta.contentLength).toBe(new TextEncoder().encode(FIXTURES["/files/guide.pdf"]!.body).length);
     expect(fileMeta.lastModified).toBeTruthy();
-    expect(file.text).toBe("");
+    expect(fileMeta.textExtracted).toBe(true);
+    expect(file.text).toContain("Fee Structure");
 
     const home = byUrl[server!.url.href]!;
     expect(home.text).not.toContain("zzzsecretzzz"); // script content must not leak
@@ -120,6 +123,46 @@ test("FTS search ranks, snippets, stems, and finds files by URL", async () => {
 
   // Content from <script> must not be findable
   expect(search(dbPath, "zzzsecretzzz")).toHaveLength(0);
+});
+
+test("PDF text extraction: guide.pdf body is indexed and searchable", async () => {
+  const db = new Database(dbPath, { readonly: true });
+  try {
+    const row = db
+      .query("SELECT text, meta FROM pages WHERE url = ?")
+      .get(`${server!.url.href}files/guide.pdf`) as { text: string; meta: string } | null;
+    expect(row).not.toBeNull();
+    expect(row!.text).toContain("Annual Fee Structure 2026");
+    expect(JSON.parse(row!.meta).textExtracted).toBe(true);
+  } finally {
+    db.close();
+  }
+  // The phrase lives inside the PDF body, not in any HTML fixture link text.
+  const hits = search(dbPath, "annual fee");
+  expect(hits.some((h) => h.url.includes("/files/guide.pdf"))).toBe(true);
+});
+
+test("broken and oversized PDFs fall back to metadata-only without crashing", async () => {
+  const db = new Database(dbPath, { readonly: true });
+  try {
+    const rows = db
+      .query("SELECT url, text, meta FROM pages WHERE url LIKE '%/files/%'")
+      .all() as { url: string; text: string; meta: string }[];
+    const byUrl = Object.fromEntries(rows.map((r) => [r.url, r]));
+    const broken = byUrl[`${server!.url.href}files/broken.pdf`]!;
+    expect(broken).toBeDefined();
+    expect(broken.text).toBe("");
+    const brokenMeta = JSON.parse(broken.meta);
+    expect(brokenMeta.kind).toBe("file");
+    expect(brokenMeta.textExtracted).toBeUndefined(); // extraction failed → no flag
+    const huge = byUrl[`${server!.url.href}files/huge.pdf`]!;
+    expect(huge).toBeDefined();
+    expect(huge.text).toBe(""); // content-length fast path: body never read
+    expect(JSON.parse(huge.meta).contentLength).toBeGreaterThan(5 * 1024 * 1024);
+    expect(JSON.parse(huge.meta).textExtracted).toBeUndefined();
+  } finally {
+    db.close();
+  }
 });
 
 test("garbage query falls back to LIKE without throwing", async () => {
