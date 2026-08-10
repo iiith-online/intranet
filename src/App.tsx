@@ -11,6 +11,7 @@ type PageMeta = {
   contentType?: string;
   contentLength?: number;
   redirectTo?: string;
+  lastModified?: string;
 };
 
 type Result = { url: string; title: string; meta: PageMeta; fetched_at: string; snippet: string };
@@ -102,13 +103,17 @@ export function App() {
   const [periods, setPeriods] = useState<TimelinePeriod[] | null>(null);
   const [timelineError, setTimelineError] = useState(false);
   const [scanEnabled, setScanEnabled] = useState(false);
+  const [scanTokenRequired, setScanTokenRequired] = useState(false);
   const [scanState, setScanState] = useState<"idle" | "running" | "done" | "error">("idle");
   const [scanMessage, setScanMessage] = useState("");
 
   useEffect(() => {
     fetch("/api/scan")
-      .then((r) => r.json() as Promise<{ enabled: boolean }>)
-      .then((d) => setScanEnabled(d.enabled))
+      .then((r) => r.json() as Promise<{ enabled: boolean; tokenRequired?: boolean }>)
+      .then((d) => {
+        setScanEnabled(d.enabled);
+        setScanTokenRequired(d.tokenRequired ?? false);
+      })
       .catch(() => setScanEnabled(false));
   }, []);
 
@@ -177,9 +182,24 @@ export function App() {
     setScanState("running");
     setScanMessage("");
     try {
-      const r = await fetch("/api/scan", { method: "POST" });
+      let token: string | null = null;
+      if (scanTokenRequired) {
+        token = sessionStorage.getItem("scanToken");
+        if (!token) {
+          token = window.prompt("Enter the scan token");
+          if (!token) throw new Error("Scan cancelled");
+          sessionStorage.setItem("scanToken", token);
+        }
+      }
+      const r = await fetch("/api/scan", {
+        method: "POST",
+        headers: token ? { "x-scan-token": token } : undefined,
+      });
       const d = (await r.json()) as { started?: boolean; error?: string };
-      if (!r.ok || !d.started) throw new Error(d.error ?? `HTTP ${r.status}`);
+      if (!r.ok || !d.started) {
+        if (r.status === 403) sessionStorage.removeItem("scanToken");
+        throw new Error(d.error ?? `HTTP ${r.status}`);
+      }
       // Poll until the background crawl finishes.
       for (;;) {
         const { promise, resolve } = Promise.withResolvers<void>();
