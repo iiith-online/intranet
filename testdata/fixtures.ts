@@ -20,7 +20,7 @@ export const FIXTURES: Record<string, { status: number; type: string; body: stri
   "/academic": {
     status: 200,
     type: "text/html",
-    body: `<html><head><title>Academic Affairs</title></head><body><p>Course registration opens every semester. Timetables and exams.</p><a href="/">Home</a></body></html>`,
+    body: `<html><head><title>Academic Affairs</title></head><body><p>Course registration opens every semester. Timetables and exams. Annual Fee Structure 2026.</p><a href="/">Home</a></body></html>`,
   },
   "/admissions": {
     status: 200,

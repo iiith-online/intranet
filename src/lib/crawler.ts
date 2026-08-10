@@ -445,12 +445,51 @@ function fallbackSnippet(text: string, query: string): string {
   return (start > 0 ? "…" : "") + t.slice(start, start + 160) + (start + 160 < t.length ? "…" : "");
 }
 
+/** How a query's double quotes are arranged: none → term mode, balanced →
+ *  phrase mode, odd count → unsearchable (callers fall back to LIKE). */
+function quoteMode(input: string): "term" | "phrase" | "unbalanced" {
+  const n = (input.match(/"/g) ?? []).length;
+  if (n === 0) return "term";
+  return n % 2 === 0 ? "phrase" : "unbalanced";
+}
+
+/** Build an FTS5 MATCH expression: no quotes → per-term prefix AND
+ *  (`"fee"* AND "struct"*`), balanced quotes → quoted phrase, anything else
+ *  (unbalanced quotes, no terms) → null so the caller falls back to LIKE. */
+export function buildFtsQuery(input: string): string | null {
+  const mode = quoteMode(input);
+  if (mode === "phrase") return '"' + input.replace(/"/g, '""') + '"';
+  if (mode === "unbalanced") return null;
+  const terms = input
+    .split(/\s+/)
+    .map((t) => t.replace(/"/g, '""'))
+    .filter((t) => t.length > 0)
+    .map((t) => `"${t}"*`);
+  return terms.length === 0 ? null : terms.join(" AND ");
+}
+
+/** Build the argument for Postgres to_tsquery/phraseto_tsquery: balanced
+ *  quotes → pass the input through for phraseto_tsquery (PG treats `"` as
+ *  blank); no quotes → per-term `term:*` joined with ` & `; unbalanced quotes
+ *  or zero surviving terms → null so the caller falls back to ILIKE. */
+export function buildPgQuery(input: string): string | null {
+  const mode = quoteMode(input);
+  if (mode === "phrase") return input;
+  if (mode === "unbalanced") return null;
+  const terms = input
+    .split(/\s+/)
+    .map((t) => t.replace(/[&|!():*]/g, "").replace(/'/g, "''"))
+    .filter((t) => t.length > 0)
+    .map((t) => `${t}:*`);
+  return terms.length === 0 ? null : terms.join(" & ");
+}
+
 export function search(dbPath: string, query: string, limit = 20): SearchResult[] {
   if (!existsSync(dbPath)) return [];
   const db = new Database(dbPath, { readonly: true });
   try {
-    // Treat the input as a literal phrase; on syntax error fall back to LIKE.
-    const phrase = '"' + query.replace(/"/g, '""') + '"';
+    const built = buildFtsQuery(query);
+    if (built === null) throw new Error("not FTS5-expressible → LIKE fallback"); // unbalanced quotes / no terms
     const rows = db
       .query(
         `SELECT p.url, p.title, p.meta, p.fetched_at, bm25(pages_fts) AS score,
@@ -458,7 +497,7 @@ export function search(dbPath: string, query: string, limit = 20): SearchResult[
          FROM pages_fts JOIN pages p ON p.url = pages_fts.url
          WHERE pages_fts MATCH ? ORDER BY score LIMIT ?`,
       )
-      .all(phrase, limit) as { url: string; title: string; meta: string; fetched_at: string; snip: string | null }[];
+      .all(built, limit) as { url: string; title: string; meta: string; fetched_at: string; snip: string | null }[];
     return rows.map((r) => ({
       url: r.url,
       title: r.title,
@@ -834,15 +873,19 @@ async function ensurePgSchema(db: Db): Promise<void> {
 
 async function pgSearch(db: Db, query: string, limit = 20): Promise<SearchResult[]> {
   try {
+    const built = buildPgQuery(query);
+    if (built === null) throw new Error("not tsquery-expressible → ILIKE fallback"); // unbalanced quotes / no terms
+    // Phrase mode (balanced quotes) or per-term prefix mode (no quotes).
+    const tsquery = query.includes('"') ? "phraseto_tsquery('english', $1)" : "to_tsquery('english', $1)";
     const rows = await db.query(
       `SELECT url, title, meta, fetched_at,
-              ts_headline('english', title || ' ' || text, plainto_tsquery('english', $1),
+              ts_headline('english', title || ' ' || text, ${tsquery},
                           'MaxWords=24, MinWords=8') AS snip
        FROM pages
-       WHERE to_tsvector('english', title || ' ' || text || ' ' || url) @@ plainto_tsquery('english', $1)
-       ORDER BY ts_rank(to_tsvector('english', title || ' ' || text || ' ' || url), plainto_tsquery('english', $1)) DESC
+       WHERE to_tsvector('english', title || ' ' || text || ' ' || url) @@ ${tsquery}
+       ORDER BY ts_rank(to_tsvector('english', title || ' ' || text || ' ' || url), ${tsquery}) DESC
        LIMIT $2`,
-      [query, limit],
+      [built, limit],
     );
     return rows.map((r) => ({
       url: String(r.url),

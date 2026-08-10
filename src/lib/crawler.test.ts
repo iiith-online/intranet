@@ -10,7 +10,7 @@ import { Database } from "bun:sqlite";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { crawl, groupPages, groupTimeline, pageLinks, recentPages, search } from "./crawler";
+import { buildFtsQuery, buildPgQuery, crawl, groupPages, groupTimeline, pageLinks, recentPages, search } from "./crawler";
 import type { PageMeta } from "./crawler";
 import { FIXTURES, serveFixtures } from "../../testdata/fixtures";
 
@@ -124,6 +124,59 @@ test("FTS search ranks, snippets, stems, and finds files by URL", async () => {
 test("garbage query falls back to LIKE without throwing", async () => {
   const hits = search(dbPath, '"-- OR 1=1');
   expect(Array.isArray(hits)).toBe(true);
+});
+
+test("buildFtsQuery builds per-term AND of prefixed terms", () => {
+  expect(buildFtsQuery("fee struct")).toBe('"fee"* AND "struct"*');
+  expect(buildFtsQuery("annual fee structure 2026")).toBe('"annual"* AND "fee"* AND "structure"* AND "2026"*');
+});
+
+test("buildFtsQuery keeps apostrophes and hyphens inside terms", () => {
+  expect(buildFtsQuery("don't-stop")).toBe('"don\'t-stop"*');
+  expect(buildFtsQuery("don't stop")).toBe('"don\'t"* AND "stop"*');
+});
+
+test("buildFtsQuery returns null for empty or whitespace-only input", () => {
+  expect(buildFtsQuery("")).toBeNull();
+  expect(buildFtsQuery("   ")).toBeNull();
+});
+
+test("buildFtsQuery wraps balanced quotes as a phrase, doubling internal quotes", () => {
+  expect(buildFtsQuery('"academic affairs"')).toBe('"""academic affairs"""');
+  expect(buildFtsQuery('say "hi" now')).toBe('"say ""hi"" now"');
+});
+
+test("buildFtsQuery returns null for unbalanced quotes", () => {
+  expect(buildFtsQuery('"academic affairs')).toBeNull();
+  expect(buildFtsQuery('fee "struct')).toBeNull();
+});
+
+test("buildPgQuery escapes apostrophes, strips operator chars, appends :*", () => {
+  expect(buildPgQuery("don't")).toBe("don''t:*");
+  expect(buildPgQuery("don't-stop")).toBe("don''t-stop:*");
+  expect(buildPgQuery("fee & struct")).toBe("fee:* & struct:*");
+  expect(buildPgQuery("a:b")).toBe("ab:*");
+});
+
+test("buildPgQuery returns null for empty input or when no terms survive", () => {
+  expect(buildPgQuery("")).toBeNull();
+  expect(buildPgQuery("   ")).toBeNull();
+  expect(buildPgQuery("& | : *")).toBeNull();
+});
+
+test("buildPgQuery passes balanced quotes through as phrase, null for unbalanced", () => {
+  expect(buildPgQuery('"academic affairs"')).toBe('"academic affairs"');
+  expect(buildPgQuery('"academic affairs')).toBeNull();
+});
+
+test("multi-word prefix AND: 'fee struct' finds the /academic page", async () => {
+  const hits = search(dbPath, "fee struct");
+  expect(hits.some((h) => h.url.includes("/academic"))).toBe(true);
+});
+
+test("fully-quoted input still phrase-matches", async () => {
+  const hits = search(dbPath, '"academic affairs"');
+  expect(hits.some((h) => h.url.includes("/academic"))).toBe(true);
 });
 
 test("search on missing db returns empty, not an error", () => {
