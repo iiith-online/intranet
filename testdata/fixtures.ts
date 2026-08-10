@@ -43,7 +43,7 @@ export const FIXTURES: Record<string, { status: number; type: string; body: stri
       <a href="/academic">Academic</a><a href="/admissions">Admissions</a>
       <a href="/restricted">Restricted</a>
       <a href="/private">Private</a><a href="/old">Old</a>
-      <a href="/files/guide.pdf">Guide</a><a href="/files/broken.pdf">Broken</a><a href="/files/huge.pdf">Huge</a><a href="https://example.com/away">External</a></body></html>`,
+      <a href="/files/guide.pdf">Guide</a><a href="/files/broken.pdf">Broken</a><a href="/files/huge.pdf">Huge</a><a href="/files/big.html">Big</a><a href="https://example.com/away">External</a></body></html>`,
   },
   "/academic": {
     status: 200,
@@ -76,6 +76,13 @@ export const FIXTURES: Record<string, { status: number; type: string; body: stri
     // 5 MB cap so the crawler rejects it on the content-length fast path.
     body: "%PDF-1.4 " + "0".repeat(6 * 1024 * 1024 - 8),
   },
+  "/files/big.html": {
+    status: 200,
+    type: "text/html",
+    // 3 MB HTML body served WITHOUT content-length below (chunked transfer) —
+    // the crawler's streamed reader must enforce the 2 MB HTML cap itself.
+    body: "<html><body>" + "0".repeat(3 * 1024 * 1024) + "</body></html>",
+  },
   "/robots.txt": { status: 200, type: "text/plain", body: "User-agent: *\nDisallow: /private\n" },
 };
 
@@ -103,6 +110,43 @@ export function serveFixtures(options: { port?: number; variant?: "removed-acade
       if (f.status === 302) {
         const location = state.variant === "removed-academic" ? "/admissions" : "/academic";
         return new Response("", { status: 302, headers: { location } });
+      }
+      // Conditional GET: every 200 route carries last-modified; when the
+      // client echoes it back with a date >= ours, answer 304 with no body
+      // (variant-agnostic — applies to all routes alike). Exception: the
+      // variant's "/" genuinely changed (the /academic link was removed), so
+      // its last-modified is bumped — a stale IMS must not 304 it, otherwise
+      // crawl 2 could not discover the variant's link graph.
+      const lastModified = (p: string) =>
+        state.variant === "removed-academic" && p === "/"
+          ? "Tue, 05 Aug 2025 00:00:00 GMT"
+          : "Mon, 04 Aug 2025 00:00:00 GMT";
+      if (f.status === 200) {
+        const ims = req.headers.get("if-modified-since");
+        if (ims) {
+          const imsDate = new Date(ims).getTime();
+          const lmDate = new Date(lastModified(path)).getTime();
+          if (Number.isFinite(imsDate) && imsDate >= lmDate) {
+            return new Response(null, { status: 304, headers: { "last-modified": lastModified(path) } });
+          }
+        }
+      }
+      if (path === "/files/big.html") {
+        // Chunked: no content-length header (Bun auto-chunks ReadableStream
+        // bodies but sets content-length for a plain string body).
+        const stream = new ReadableStream<Uint8Array>({
+          start(c) {
+            c.enqueue(new TextEncoder().encode(f.body));
+            c.close();
+          },
+        });
+        return new Response(stream, {
+          status: f.status,
+          headers: {
+            "content-type": f.type,
+            "last-modified": lastModified(path),
+          },
+        });
       }
       const body = state.variant === "removed-academic" && path === "/" ? FIXTURES["/"]!.body.replace('<a href="/academic">Academic</a>', "") : f.body;
       // Huge route: real content-length exceeds the PDF cap; the crawler must

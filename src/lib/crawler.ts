@@ -157,6 +157,9 @@ function pdfMaxBytes(): number {
   return (Number.isFinite(n) && n > 0 ? n : 5) * 1024 * 1024;
 }
 
+/** HTML body cap: bodies over 2 MB are recorded metadata-only. */
+const HTML_BODY_CAP = 2 * 1024 * 1024;
+
 /** Read a body stream into a byte buffer, cancelling the reader (and returning
  *  undefined) once more than maxBytes have been read. */
 async function readBodyCapped(res: Response, maxBytes: number): Promise<Uint8Array | undefined> {
@@ -208,11 +211,17 @@ async function extractPdfText(bytes: Uint8Array): Promise<string | null> {
   }
 }
 
-async function fetchPage(url: string, timeoutMs: number, cookie?: string): Promise<Fetched> {
+async function fetchPage(url: string, timeoutMs: number, cookie?: string, ifModifiedSince?: string): Promise<Fetched> {
   try {
     const res = await fetch(url, {
       redirect: "follow",
-      headers: { "user-agent": UA, ...(cookie ? { cookie } : {}) },
+      headers: {
+        "user-agent": UA,
+        ...(cookie ? { cookie } : {}),
+        // Verbatim echo of the stored Last-Modified header: the server 304s
+        // when its copy is no newer than ours.
+        ...(ifModifiedSince ? { "if-modified-since": ifModifiedSince } : {}),
+      },
       signal: AbortSignal.timeout(timeoutMs),
     });
     const contentType = res.headers.get("content-type") ?? "";
@@ -222,7 +231,14 @@ async function fetchPage(url: string, timeoutMs: number, cookie?: string): Promi
     const xPoweredBy = res.headers.get("x-powered-by") ?? undefined;
     const cacheControl = res.headers.get("cache-control") ?? undefined;
     const expires = res.headers.get("expires") ?? undefined;
-    // The session cookie is deliberately not stored.
+    // Conditional GET hit: the stored copy is current. MUST come before the
+    // generic non-200 return below, and the body stream must be cancelled —
+    // Bun surfaces a 304 with a present, non-null body; without the cancel
+    // the connection is not reusable.
+    if (res.status === 304) {
+      res.body?.cancel();
+      return { status: 304 };
+    }
     if (res.status !== 200) {
       return { status: res.status, contentType, contentLength, lastModified, server, xPoweredBy, cacheControl, expires, finalUrl: res.url };
     }
@@ -242,7 +258,25 @@ async function fetchPage(url: string, timeoutMs: number, cookie?: string): Promi
       const body = bytes !== undefined && (contentType.includes("pdf") || sniffsPdf(bytes)) ? bytes : undefined;
       return { status: 200, contentType, contentLength, lastModified, server, xPoweredBy, cacheControl, expires, body, finalUrl: res.url };
     }
-    return { status: 200, contentType, contentLength, lastModified, server, xPoweredBy, cacheControl, expires, body: await res.text(), finalUrl: res.url };
+    // HTML: read up to the 2 MB cap. Content-length fast path: never touch a
+    // body we would only discard. Over-cap (either way) → metadata-only.
+    if (Number.isFinite(contentLength) && contentLength > HTML_BODY_CAP) {
+      res.body?.cancel();
+      return { status: 200, contentType, contentLength, lastModified, server, xPoweredBy, cacheControl, expires, finalUrl: res.url };
+    }
+    const htmlBytes = await readBodyCapped(res, HTML_BODY_CAP);
+    return {
+      status: 200,
+      contentType,
+      contentLength,
+      lastModified,
+      server,
+      xPoweredBy,
+      cacheControl,
+      expires,
+      body: htmlBytes === undefined ? undefined : new TextDecoder().decode(htmlBytes),
+      finalUrl: res.url,
+    };
   } catch {
     return { status: -1 }; // network error / timeout
   }
@@ -426,11 +460,16 @@ export async function crawl(options: CrawlOptions = {}): Promise<{
     }
 
     // Pre-fetch row lookup: a -1 (network/timeout) keeps a last-good 200 row
-    // untouched below; T6 reuses the same lookup for If-Modified-Since.
-    const existing = db.query("SELECT status, meta FROM pages WHERE url = ?").get(url) as
-      | { status: number; meta: string }
+    // untouched below; a live 200 row with a stored Last-Modified feeds
+    // If-Modified-Since (unchanged pages answer 304); a 304 re-queues the
+    // row's stored links so the graph is still traversed.
+    const existing = db.query("SELECT status, meta, links FROM pages WHERE url = ?").get(url) as
+      | { status: number; meta: string; links: string }
       | undefined;
-    const page = await fetchPage(url, timeoutMs, cookie);
+    const existingMeta = existing ? parseMeta(existing.meta) : undefined;
+    const ifModifiedSince =
+      existing?.status === 200 && existingMeta?.lastModified ? existingMeta.lastModified : undefined;
+    const page = await fetchPage(url, timeoutMs, cookie, ifModifiedSince);
     // fetch() already followed any redirect chain; record a 302 stub for the
     // original URL and index the final URL instead (same-origin only).
     const finalUrl = page.finalUrl ?? url;
@@ -458,26 +497,26 @@ export async function crawl(options: CrawlOptions = {}): Promise<{
       };
       record(url, 200, "", meta, text ?? "", []);
       fetched++;
-    } else if (page.status === 200 && typeof page.body === "string") {
-      const { title, meta, text, links } = await extractHtml(page.body, url);
-      record(
-        url,
-        200,
-        title,
-        {
-          ...meta,
-          contentType: page.contentType,
-          contentLength: page.contentLength,
-          lastModified: page.lastModified,
-          server: page.server,
-          xPoweredBy: page.xPoweredBy,
-          cacheControl: page.cacheControl,
-          expires: page.expires,
-        },
-        text,
-        links,
-      );
-      for (const link of links) if (!seen.has(link)) queue.push(link);
+    } else if (page.status === 200 && (page.contentType?.includes("text/html") ?? false)) {
+      const meta: PageMeta = {
+        kind: "html",
+        contentType: page.contentType,
+        contentLength: page.contentLength,
+        lastModified: page.lastModified,
+        server: page.server,
+        xPoweredBy: page.xPoweredBy,
+        cacheControl: page.cacheControl,
+        expires: page.expires,
+      };
+      if (typeof page.body === "string") {
+        const { title, meta: m, text, links } = await extractHtml(page.body, url);
+        record(url, 200, title, { ...m, ...meta }, text, links);
+        for (const link of links) if (!seen.has(link)) queue.push(link);
+      } else {
+        // Over-cap HTML: the body was cancelled at fetch time, so record
+        // metadata-only (no partial body is retained).
+        record(url, 200, "", meta, "", []);
+      }
       fetched++;
     } else if (page.status === 200) {
       // Non-PDF file (XLS/…): metadata only, body was cancelled at fetch time.
@@ -499,6 +538,14 @@ export async function crawl(options: CrawlOptions = {}): Promise<{
         [],
       );
       fetched++;
+    } else if (page.status === 304) {
+      // Conditional GET hit: the stored row is current — leave it untouched
+      // (no record call). It already counts as reached for the sweep:
+      // seen.add ran before the fetch, so an all-304 crawl sweeps nothing.
+      // Re-queue the row's stored outbound links: a page whose body we did
+      // not re-read must not strand its children.
+      const storedLinks = existing ? (JSON.parse(existing.links) as string[]) : [];
+      for (const link of storedLinks) if (!seen.has(link)) queue.push(link);
     } else if (page.status === -1) {
       failed++;
       // A -1 (network error/timeout) must not clobber a live row: keep the

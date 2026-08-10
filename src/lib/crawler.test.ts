@@ -42,10 +42,10 @@ test("crawl indexes reachable pages, respects robots, records errors and redirec
   const result = await crawl({ baseUrl: server!.url.href, dbPath, maxPages: 100, delayMs: 0 });
 
   // Content pages: /, /academic, /admissions, /restricted(403) + guide.pdf,
-  // broken.pdf and huge.pdf file records. /old redirects to /academic (already
-  // seen) so only a 302 stub is recorded for it. /private robots-blocked,
-  // external link dropped.
-  expect(result.fetched).toBe(7);
+  // broken.pdf and huge.pdf file records + big.html (over-cap HTML,
+  // metadata-only). /old redirects to /academic (already seen) so only a 302
+  // stub is recorded for it. /private robots-blocked, external link dropped.
+  expect(result.fetched).toBe(8);
   expect(result.skipped).toBe(1); // /private
   expect(result.failed).toBe(0);
 
@@ -447,6 +447,87 @@ test("stale sweep 410s pages unreached in crawl 2; -1 keeps the last good 200 ro
         // ignore EBUSY; tmpdir is cleaned by the OS eventually
       }
     }
+  }
+});
+
+test("conditional GET: crawl 2 sends If-Modified-Since; 200 rows keep fetched_at and text", async () => {
+  const base = server!.url.href;
+  // Self-contained: refresh the shared db, snapshot status-200 rows, crawl
+  // again, and assert the 200 rows were left untouched. The equality itself
+  // proves If-Modified-Since was sent and honored — a re-fetch would rewrite
+  // fetched_at and re-extract text. /old's 302 stub and /restricted's 403 row
+  // are legitimately re-recorded every crawl, hence the 200-only scope.
+  await crawl({ baseUrl: base, dbPath, maxPages: 100, delayMs: 0 });
+
+  const snapshot = (() => {
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      return db.query("SELECT url, status, text, fetched_at FROM pages WHERE status = 200").all() as {
+        url: string;
+        status: number;
+        text: string;
+        fetched_at: string;
+      }[];
+    } finally {
+      db.close();
+    }
+  })();
+  expect(snapshot.length).toBeGreaterThan(0);
+
+  const result = await crawl({ baseUrl: base, dbPath, maxPages: 100, delayMs: 0 });
+  expect(result.failed).toBe(0);
+
+  const after = (() => {
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      return db.query("SELECT url, status, text, meta, fetched_at FROM pages").all() as {
+        url: string;
+        status: number;
+        text: string;
+        meta: string;
+        fetched_at: string;
+      }[];
+    } finally {
+      db.close();
+    }
+  })();
+  const beforeByUrl = Object.fromEntries(snapshot.map((r) => [r.url, r]));
+  const after200 = after.filter((r) => r.status === 200);
+  // The whole 200-row set must survive crawl 2: an all-304 crawl sweeps
+  // nothing (reached via the 304 branch's stored-link re-queue), so no row
+  // may have been 410'd or re-recorded.
+  expect(after200.length).toBe(snapshot.length);
+  for (const row of after200) {
+    expect(row.fetched_at).toBe(beforeByUrl[row.url]!.fetched_at);
+    expect(row.text).toBe(beforeByUrl[row.url]!.text);
+  }
+  // A 304 must never be recorded as a row, and no live row may regress to
+  // kind "error" (304 must not land in the -1/error dispatch branch).
+  expect(after.some((r) => r.status === 304)).toBe(false);
+  for (const row of after200) {
+    expect(JSON.parse(row.meta).kind).not.toBe("error");
+  }
+});
+
+test("over-cap chunked HTML route is recorded metadata-only with empty text", async () => {
+  const base = server!.url.href;
+  // The fixture route must genuinely lack content-length (chunked transfer),
+  // so the cap is enforced by the streamed reader, not the fast path.
+  const res = await fetch(`${base}files/big.html`);
+  expect(res.headers.get("content-length")).toBeNull();
+
+  await crawl({ baseUrl: base, dbPath, maxPages: 100, delayMs: 0 });
+
+  const db = new Database(dbPath, { readonly: true });
+  try {
+    const row = db.query("SELECT text, meta FROM pages WHERE url = ?").get(`${base}files/big.html`) as
+      | { text: string; meta: string }
+      | null;
+    expect(row).not.toBeNull();
+    expect(row!.text).toBe("");
+    expect(JSON.parse(row!.meta).kind).toBe("html");
+  } finally {
+    db.close();
   }
 });
 
